@@ -211,8 +211,8 @@ function banner(t,btn,act){const b=$('#banner');b.innerHTML=esc(t)+(btn?' <butto
 const LISTS=['accounts','customers','suppliers','custodies','centers','inst','journal','items','whs','moves','docs','assets','emps','payruns','recon','audit'];
 const CHUNK={audit:300,journal:150,inst:400,moves:300,items:400,docs:150};
 let S={meta:{},accounts:[],customers:[],suppliers:[],custodies:[],centers:[],inst:[],journal:[],items:[],whs:[],moves:[],docs:[],assets:[],emps:[],payruns:[],recon:[],audit:[]};
-let IX={};
-function reindex(){
+let IX={},PAID=null;
+function reindex(){PAID=null;
   IX.acc=new Map(S.accounts.map(a=>[a.code,a]));IX.cu=new Map(S.customers.map(a=>[a.code,a]));
   IX.su=new Map(S.suppliers.map(a=>[a.code,a]));IX.cs=new Map(S.custodies.map(a=>[a.code,a]));IX.cc=new Map(S.centers.map(a=>[a.code,a]));IX.it=new Map(S.items.map(a=>[a.code,a]));IX.wh=new Map(S.whs.map(a=>[a.code,a]));IX.doc=new Map((S.docs||[]).map(a=>[a.id,a]));
 }
@@ -334,11 +334,12 @@ const fq=n=>{n=Math.round((n||0)*1000)/1000;return n===0?'–':n.toLocaleString(
 
 /* ============ table renderer (also feeds Excel export) ============ */
 let TBL=[];
-function table(title,cols,rows,o={}){TBL.push({title,cols,rows,foot:o.foot});
+const CAP=400;let CAPALL=false;
+function table(title,cols,rows,o={}){TBL.push({title,cols,rows,foot:o.foot});const full=rows;if(!CAPALL&&rows.length>CAP)rows=rows.slice(0,CAP);
   const cell=(c,r)=>c.h?c.h(r):c.n?fmt(r[c.k]):esc(r[c.k]);
   return '<div class="tw"><table><thead><tr>'+cols.map(c=>'<th'+(c.n?' class="num"':'')+'>'+c.t+'</th>').join('')+'</tr></thead><tbody>'+
     (rows.length?rows.map(r=>'<tr'+(o.row?' '+o.row(r):'')+'>'+cols.map(c=>'<td class="'+(c.n?'num ':'')+(/^(m|date|due|code|old|paid|no)$/.test(c.k)?'nw ':'')+(c.c?c.c(r):'')+'">'+cell(c,r)+'</td>').join('')+'</tr>').join(''):'<tr><td colspan="'+cols.length+'" class="mute">'+(o.empty||'لا توجد بيانات')+'</td></tr>')+
-    '</tbody>'+(o.foot?'<tfoot><tr>'+cols.map(c=>'<td'+(c.n?' class="num"':'')+'>'+(o.foot[c.k]===undefined?'':typeof o.foot[c.k]==='number'?fmt(o.foot[c.k]):esc(o.foot[c.k]))+'</td>').join('')+'</tr></tfoot>':'')+'</table></div>'}
+    (full.length>rows.length?'<tr><td colspan="'+cols.length+'" class="mute">يُعرض أول '+rows.length+' من '+full.length+' (التصدير والإجماليات تشمل الكل) — استخدم البحث أو التاريخ للتضييق، أو <button class="btn sm" data-act="showall">عرض الكل</button></td></tr>':'')+'</tbody>'+(o.foot?'<tfoot><tr>'+cols.map(c=>'<td'+(c.n?' class="num"':'')+'>'+(o.foot[c.k]===undefined?'':typeof o.foot[c.k]==='number'?fmt(o.foot[c.k]):esc(o.foot[c.k]))+'</td>').join('')+'</tr></tfoot>':'')+'</table></div>'}
 const sumK=(rows,ks)=>{const f={};ks.forEach(k=>f[k]=rows.reduce((s,r)=>s+(r[k]||0),0));return f};
 const xbtn=()=>'<button class="btn" data-act="xls">تصدير Excel</button>';
 const zsel=()=>'<label>الأرصدة الصفرية<select data-set="zv.z"><option value=""'+(V.zv.z?'':' selected')+'>إخفاء</option><option value="1"'+(V.zv.z?' selected':'')+'>إظهار</option></select></label>';
@@ -728,6 +729,7 @@ function saveMove(){const M=MV,err=t=>{$('#err').textContent=t},qty=num(M.qty),t
   if(!M.date||!it||!IX.wh.get(M.wh))return err('التاريخ والصنف والمخزن مطلوبة.');if(!(qty>0))return err('أدخل كمية أكبر من صفر.');if(cost<0)return err('التكلفة لا تكون سالبة.');
   if(tr&&(!IX.wh.get(M.wh2)||M.wh2===M.wh))return err('اختر مخزناً مختلفاً للتحويل إليه.');
   const old=M.i!=null?S.moves[M.i]:null;
+  if(old){const e=negAfter([old],[{item:M.item,wh:M.wh,wh2:tr?M.wh2:'',type:M.type,qty,cost}]);if(e)return err('لا يمكن التعديل: '+e)}
   if(!inn){const e=stockWithout(old).get(M.item),av=(e&&e.wh.get(M.wh))||0;if(qty>av+0.0005)return err('الكمية المتاحة في هذا المخزن '+(av>0?fq(av):'صفر')+' '+(it.unit||'')+' فقط.')}
   const ia=invAcc(),amt=r2(qty*cost);if(!tr&&M.acc&&!ia)return err('حدّد حساب المخزون من الإعدادات أولاً، أو اختر «بدون قيد محاسبي».');
   if(!tr&&M.acc&&!(amt>0))return err('أدخل تكلفة الوحدة لإنشاء القيد المحاسبي.');
@@ -740,7 +742,7 @@ function saveMove(){const M=MV,err=t=>{$('#err').textContent=t},qty=num(M.qty),t
     S.journal.push(...(inn?[iv,ct]:[ct,iv]));m.je=je}
   if(old)S.moves[M.i]=m;else S.moves.push(m);if(M.type==='وارد'&&cost>0&&it.cost!==cost){it.cost=cost;persist('items')}
   persist('moves');persist('journal');closeModal();render();toast(m.je!==''?'تم حفظ الحركة وإنشاء القيد '+m.je:'تم حفظ الحركة')}
-function delMove(){const m=S.moves[MV.i];{const e=lockChk([m.date]);if(e)return toast(e)}ask('حذف حركة المخزون رقم '+m.no+(m.je!==''&&m.je!=null?' والقيد المحاسبي المرتبط بها ('+m.je+')':'')+'؟','حذف',()=>{aud('حذف','حركة مخزون',m.date+' · '+nm('it',m.item));S.journal=S.journal.filter(l=>!linked(l,m));S.moves=S.moves.filter(x=>x!==m);persist('moves');persist('journal');render();toast('تم حذف الحركة')})}
+function delMove(){const m=S.moves[MV.i];{const e=lockChk([m.date]);if(e)return toast(e);const n=negAfter([m]);if(n)return toast('لا يمكن الحذف: '+n)}ask('حذف حركة المخزون رقم '+m.no+(m.je!==''&&m.je!=null?' والقيد المحاسبي المرتبط بها ('+m.je+')':'')+'؟','حذف',()=>{aud('حذف','حركة مخزون',m.date+' · '+nm('it',m.item));S.journal=S.journal.filter(l=>!linked(l,m));S.moves=S.moves.filter(x=>x!==m);persist('moves');persist('journal');render();toast('تم حذف الحركة')})}
 
 /* ============ files: export / import / backup ============ */
 async function saveFile(name,data,mime){
@@ -798,7 +800,7 @@ function parseWorkbook(buf){const wb=XLSX.read(buf,{type:'array'});const sh=n=>{
   o.items=S.items;o.whs=S.whs;o.moves=S.moves;return{o,bad}}
 
 /* ============ events ============ */
-const A={
+const A={showall(){CAPALL=true;render();CAPALL=false},
   qadd(el){qAdd(el)},qsave(){qSave()},qclose(){qClose()},
   close(){closeModal()},askyes(){const f=askCb;askCb=null;closeModal();f&&f()},
   xls(){xlsOut(TBL,CURT)},xlsall(){xlsOut(allTables(),'دفاتر '+(S.meta.company||'الشركة')+' '+today())},
@@ -873,9 +875,10 @@ function invCalc(d){const ls=d.lines.filter(l=>num(l.qty)>0),sub=r2(ls.reduce((s
   const groups=Object.keys(tg).map(k=>{const g=tg[k];g.vat=r2(g.base*g.rate/100);return g}),vat=r2(groups.reduce((a,g)=>a+g.vat,0)),lv=ls.map(()=>0);
   groups.forEach(g=>{let lf=g.vat;g.idx.forEach((i,j)=>{const v=j===g.idx.length-1?lf:r2(g.base?nets[i]*g.vat/g.base:0);lf=r2(lf-v);lv[i]=v})});
   return{ls,sub,disc,net,vat,total:r2(net+vat),nets,groups,lv}}
-const paidOf=d=>r2(S.docs.reduce((s,x)=>x.kind==='vch'&&x.inv===d.id?s+x.amt:s,0));
+const paidOf=d=>{if(!PAID||PAID.n!==S.docs.length){PAID=new Map();PAID.n=S.docs.length;S.docs.forEach(x=>{if(x.kind==='vch'&&x.inv)PAID.set(x.inv,(PAID.get(x.inv)||0)+x.amt)})}return r2(PAID.get(d.id)||0)};
 const remOf=d=>r2((d.total||0)-paidOf(d));
 function stateOf(d){const rem=remOf(d),p=paidOf(d);if(rem<=0.005)return['مسددة','good'];if(d.due&&d.due<today())return['متأخرة','bad'];return p>0?['جزئي','warn']:['غير مسددة','']}
+function negAfter(rem,add){const keep=S.moves,b0=stock();S.moves=keep.filter(x=>!rem.includes(x)).concat(add||[]);let bad='';try{const st=stock();for(const m of[].concat(rem,add||[])){for(const w of[m.wh,m.type==='تحويل'?m.wh2:''].filter(Boolean)){const q=((st.get(m.item)||{wh:new Map()}).wh.get(w))||0,q0=((b0.get(m.item)||{wh:new Map()}).wh.get(w))||0;if(q<-0.0005&&q<q0-0.0005){bad='رصيد «'+nm('it',m.item)+'» في مخزن «'+nm('wh',w)+'» سيصبح '+fq(q)+' (بيع منه مسبقاً)';break}}if(bad)break}}finally{S.moves=keep}return bad}
 function stockExcl(id){const keep=S.moves;S.moves=keep.filter(x=>x.dc!==id);const st=stock();S.moves=keep;return st}
 const fixDocLinks=()=>{reindex()};
 /* ---- vouchers: posting ---- */
@@ -956,7 +959,7 @@ function commitDoc(D){const T=DOCT[D.t],sale=!!T.sale,ret=!!T.ret,err=m=>({err:m
   if(old)S.docs[S.docs.indexOf(old)]=doc;else S.docs.push(doc);reindex();
   if(pay>0){const v={id:uid(),kind:'vch',t:sale?'قبض':'صرف',no:nextNo(sale?'قبض':'صرف'),date:D.date,party:DOCT[D.t].pk+':'+D.party,acc:D.payAcc,ctr:'',amt:r2(pay),desc:'دفعة على '+docLabel(doc),cc:doc.cc,inv:doc.id,je:''};const e=postV(v);if(e)toast('تم حفظ المستند، لكن تعذّر تسجيل الدفعة: '+e);else{S.docs.push(v);reindex()}}
   persist('docs');persist('journal');persist('moves');persist('items');return{doc}}
-function delDoc(){const d=IX.doc.get(DD.id);if(!d)return;{const e=lockChk([d.date]);if(e){$('#err').textContent=e;return}}const pays=S.docs.filter(x=>x.kind==='vch'&&x.inv===d.id);
+function delDoc(){const d=IX.doc.get(DD.id);if(!d)return;{const e=lockChk([d.date]);if(e){$('#err').textContent=e;return}const n=negAfter(S.moves.filter(x=>x.dc===d.id));if(n){$('#err').textContent='لا يمكن الحذف: '+n;return}}const pays=S.docs.filter(x=>x.kind==='vch'&&x.inv===d.id);
   if(pays.length){$('#err').textContent='لا يمكن الحذف: عليها '+pays.length+' سند. احذف السندات أولاً (أو عدّلها).';return}
   ask('حذف '+docLabel(d)+' والقيد وحركات المخزن المرتبطة بها؟','حذف',()=>{aud('حذف',DOCT[d.t].n+' '+docLabel(d),d.date+' · '+fmt(d.total));S.journal=S.journal.filter(l=>l.dc!==d.id);S.moves=S.moves.filter(x=>x.dc!==d.id);S.docs=S.docs.filter(x=>x!==d);reindex();persist('docs');persist('journal');persist('moves');render();toast('تم الحذف')})}
 /* ---- voucher editor ---- */
@@ -1374,12 +1377,13 @@ const eom=m=>{const[y,mo]=m.split('-').map(Number);return m+'-'+p2(new Date(y,mo
 const lockDate=()=>S.meta.lockDate||'';
 const lockChk=ds=>{const L=lockDate();if(!L)return'';const b=(ds||[]).filter(Boolean).find(d=>d<=L);return b?'الفترة مقفلة حتى '+L+' — لا يمكن إضافة أو تعديل أو حذف مستند بتاريخ '+b:''};
 function aud(act,obj,det){(S.audit||(S.audit=[])).push({at:new Date().toISOString(),u:S.meta.user||'',act,obj,det:det||''});if(S.audit.length>6000)S.audit.splice(0,S.audit.length-6000);persist('audit')}
+const okDate=d=>/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(d||'')&&!isNaN(new Date(d));
 const jl=(no,date,desc,tag,a,d,c,cc)=>({date,no,desc,tag,a,cc:cc||'',cu:'',su:'',cs:'',d:r2(d),c:r2(c)});
 const errTxt=()=>{const e=$('#err');return e&&e.textContent};
 /* ---- حماية الفترات المقفلة + تسجيل العمليات ---- */
-{const _se=saveEntry;saveEntry=function(f){const E=ED,was=E.orig!=null,old=was?S.journal.filter(l=>String(l.no)===String(E.orig)).map(l=>l.date):[];const e=lockChk([E.date].concat(old));if(e){$('#err').textContent=e;return}_se(f);if(!errTxt())aud(was?'تعديل':'إنشاء','قيد '+E.no,E.date+' · '+(E.desc||''))}}
-{const _cd=commitDoc;commitDoc=function(D){const old=IX.doc.get(D.id),e=lockChk([D.date,old&&old.date]);if(e)return{err:e};const r=_cd(D);if(!r.err)aud(old?'تعديل':'إنشاء',DOCT[D.t].n+' '+docLabel(r.doc),r.doc.date+' · '+fmt(r.doc.total));return r}}
-{const _sv=saveV;saveV=function(){const old=IX.doc.get(VD.id),e=lockChk([VD.date,old&&old.date]);if(e){$('#err').textContent=e;return}_sv();if(!errTxt()){const v=IX.doc.get(VD.id);if(v)aud(old?'تعديل':'إنشاء',DOCT[v.t].n+' '+docLabel(v),v.date+' · '+fmt(v.amt))}}}
+{const _se=saveEntry;saveEntry=function(f){if(!okDate(ED.date)){$('#err').textContent='تاريخ القيد غير صحيح.';return}const E=ED,was=E.orig!=null,old=was?S.journal.filter(l=>String(l.no)===String(E.orig)).map(l=>l.date):[];const e=lockChk([E.date].concat(old));if(e){$('#err').textContent=e;return}_se(f);if(!errTxt())aud(was?'تعديل':'إنشاء','قيد '+E.no,E.date+' · '+(E.desc||''))}}
+{const _cd=commitDoc;commitDoc=function(D){if(!okDate(D.date))return{err:'التاريخ غير صحيح.'};const old=IX.doc.get(D.id),e=lockChk([D.date,old&&old.date]);if(e)return{err:e};if(old&&old.kind==='inv'){const T0=DOCT[D.t];if((!T0.sale&&!T0.ret)||(T0.sale&&T0.ret)){const n=negAfter(S.moves.filter(x=>x.dc===D.id),D.lines.filter(l=>l.item&&num(l.qty)>0).map(l=>({item:l.item,wh:D.wh,wh2:'',type:'وارد',qty:num(l.qty),cost:0})));if(n)return{err:'لا يمكن التعديل: '+n}}}const r=_cd(D);if(!r.err)aud(old?'تعديل':'إنشاء',DOCT[D.t].n+' '+docLabel(r.doc),r.doc.date+' · '+fmt(r.doc.total));return r}}
+{const _sv=saveV;saveV=function(){if(!okDate(VD.date)){$('#err').textContent='التاريخ غير صحيح.';return}const old=IX.doc.get(VD.id),e=lockChk([VD.date,old&&old.date]);if(e){$('#err').textContent=e;return}_sv();if(!errTxt()){const v=IX.doc.get(VD.id);if(v)aud(old?'تعديل':'إنشاء',DOCT[v.t].n+' '+docLabel(v),v.date+' · '+fmt(v.amt))}}}
 {const _sm=saveMove;saveMove=function(){const old=MV.i!=null?S.moves[MV.i]:null,e=lockChk([MV.date,old&&old.date]);if(e){$('#err').textContent=e;return}_sm();if(!errTxt())aud(old?'تعديل':'إنشاء','حركة مخزون',MV.date+' · '+nm('it',MV.item)+' × '+MV.qty)}}
 document.addEventListener('change',ev=>{const el=ev.target;if(el.dataset&&el.dataset.lk!==undefined){S.meta.lockDate=el.value;Store.put('meta',S.meta);aud('قفل فترات','حتى '+(el.value||'—'),'');render();toast(el.value?'تم قفل الفترات حتى '+el.value:'تم فتح كل الفترات')}});
 /* ---- الإقفال والفترات ---- */
