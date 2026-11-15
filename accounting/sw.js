@@ -1,4 +1,4 @@
-const C='zabtaha-f245cf3af2';
+const C='zabtaha-f71805375e';
 const PRE=['./','seed.js','fonts/fonts.css','manifest.webmanifest','logo/icon-192.png'];
 self.addEventListener('install',e=>{e.waitUntil(caches.open(C).then(c=>c.addAll(PRE)).then(()=>self.skipWaiting()))});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==C).map(x=>caches.delete(x)))).then(()=>self.clients.claim()))});
