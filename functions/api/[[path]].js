@@ -10,7 +10,10 @@ async function ensure(db){if(READY)return;
   await db.batch([
     db.prepare("CREATE TABLE IF NOT EXISTS companies(id TEXT PRIMARY KEY,name TEXT,seq INTEGER NOT NULL DEFAULT 0,next_dev INTEGER NOT NULL DEFAULT 2,exp TEXT NOT NULL DEFAULT '',created INTEGER)"),
     db.prepare("CREATE TABLE IF NOT EXISTS records(cid TEXT NOT NULL,l TEXT NOT NULL,k TEXT NOT NULL,rev INTEGER NOT NULL,seq INTEGER NOT NULL,d TEXT,del INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(cid,l,k))"),
-    db.prepare("CREATE INDEX IF NOT EXISTS rec_seq ON records(cid,seq)")]);
+    db.prepare("CREATE INDEX IF NOT EXISTS rec_seq ON records(cid,seq)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS devices(dev TEXT PRIMARY KEY,first INTEGER NOT NULL,last INTEGER NOT NULL,opens INTEGER NOT NULL DEFAULT 1,ed TEXT,ver TEXT,lic TEXT,licn TEXT,exp TEXT,fp TEXT,iph TEXT)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS dev_fp ON devices(fp,iph)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS revoked(h TEXT PRIMARY KEY,at INTEGER,note TEXT)")]);
   READY=true}
 const b64u=s=>{s=String(s).replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';const r=atob(s),u=new Uint8Array(r.length);for(let i=0;i<r.length;i++)u[i]=r.charCodeAt(i);return u};
 async function sha(s){const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));return[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')}
@@ -30,6 +33,34 @@ export async function onRequest({request,env}){
   if(request.method!=='POST')return J({err:'method'},405);
   let b;try{b=await request.json()}catch(e){return J({err:'json'},400)}
   const db=env.DB;await ensure(db);
+  if(route==='lic/hello'){
+    const dev=String(b.dev||'');if(!/^[A-Z0-9]{10}$/.test(dev))return J({err:'dev'},400);
+    const now=Date.now(),fp=String(b.fp||'').replace(/[^a-f0-9]/g,'').slice(0,24),ed=String(b.ed||'').slice(0,5),ver=String(b.ver||'').slice(0,16);
+    const iph=(await sha('ip|'+(request.headers.get('cf-connecting-ip')||''))).slice(0,16);
+    let lh='',licn='',exp='';
+    if(b.lic){const L=await checkLic(b.lic,dev);if(L.ok){lh=(await sha(String(b.lic).replace(/\s+/g,''))).slice(0,16);licn=String(L.name||'').slice(0,60);exp=L.exp||''}}
+    await db.prepare("INSERT INTO devices(dev,first,last,opens,ed,ver,lic,licn,exp,fp,iph) VALUES(?1,?2,?2,1,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(dev) DO UPDATE SET last=?2,opens=opens+1,ed=?3,ver=?4,lic=?5,licn=?6,exp=?7,fp=?8,iph=?9").bind(dev,now,ed,ver,lh,licn,exp,fp,iph).run();
+    const me=await db.prepare('SELECT first FROM devices WHERE dev=?').bind(dev).first();
+    let first=me?me.first:now;
+    if(fp){const o=await db.prepare('SELECT MIN(first) f FROM devices WHERE fp=?1 AND iph=?2 AND lic=\'\'').bind(fp,iph).first();if(o&&o.f&&o.f<first)first=o.f}
+    const rv=lh?await db.prepare('SELECT 1 x FROM revoked WHERE h=?').bind(lh).first():null;
+    return J({ok:1,t:now,first,rev:rv?1:0})}
+  if(route.startsWith('admin/')){
+    const ts=+b.ts||0;if(Math.abs(Date.now()-ts)>10*60*1000)return J({err:'ts'},401);
+    const msg=route==='admin/revoke'||route==='admin/unrevoke'?route+':'+String(b.h||'')+':'+ts:route+':'+ts;
+    let good=false;try{const k=await crypto.subtle.importKey('jwk',PUB,{name:'ECDSA',namedCurve:'P-256'},false,['verify']);good=await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},k,b64u(String(b.sig||'')),new TextEncoder().encode(msg))}catch(e){}
+    if(!good)return J({err:'auth'},401);
+    const day=864e5,now=Date.now(),q=(sql,...a)=>db.prepare(sql).bind(...a).first();
+    if(route==='admin/revoke'||route==='admin/unrevoke'){const h=String(b.h||'').replace(/[^a-f0-9]/g,'').slice(0,16);if(h.length!==16)return J({err:'h'},400);
+      if(route==='admin/revoke')await db.prepare('INSERT OR REPLACE INTO revoked(h,at,note) VALUES(?,?,?)').bind(h,now,String(b.note||'').slice(0,80)).run();else await db.prepare('DELETE FROM revoked WHERE h=?').bind(h).run();return J({ok:1})}
+    if(route==='admin/stats'){
+      const n=async(w,...a)=>(await q('SELECT COUNT(*) n FROM devices'+(w?' WHERE '+w:''),...a)).n;
+      const byDay=(await db.prepare("SELECT strftime('%Y-%m-%d',first/1000,'unixepoch') d,COUNT(*) n FROM devices WHERE first>?1 GROUP BY d ORDER BY d DESC").bind(now-14*day).all()).results||[];
+      const lic=(await db.prepare("SELECT dev,lic,licn,exp,ed,last,opens,first FROM devices WHERE lic!='' ORDER BY last DESC LIMIT 300").all()).results||[];
+      const rev=new Set(((await db.prepare('SELECT h FROM revoked').all()).results||[]).map(r=>r.h));
+      const cos=await q('SELECT COUNT(*) n FROM companies');
+      return J({ok:1,total:await n(),real:await n('opens>=2'),active7:await n('last>?',now-7*day),active30:await n('last>?',now-30*day),licensed:await n("lic!=''"),trial:await n("lic=''"),acc:await n("ed='acc'"),pos:await n("ed='pos'"),new7:await n('first>?',now-7*day),companies:cos.n,byDay,licenses:lic.map(r=>Object.assign({},r,{revoked:rev.has(r.lic)}))})}
+    return J({err:'route'},404)}
   const code=String(b.code||'').trim();if(code.length<16||code.length>80)return J({err:'code',msg:'رمز المزامنة غير صحيح.'},400);
   const cid=(await sha(code)).slice(0,32);
   const getC=()=>db.prepare('SELECT * FROM companies WHERE id=?').bind(cid).first();
