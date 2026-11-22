@@ -906,6 +906,7 @@ const ICON = {
         ["stock", "أرصدة المخزون"],
         ["stocktake", "الجرد"],
         ["moves", "حركات المخزون"],
+        ["lots", "الدُفعات وتواريخ الصلاحية"],
         ["items", "الأصناف"],
         ["warehouses", "المخازن"],
       ],
@@ -1470,6 +1471,7 @@ const TXN = { S: "قياسي", L10: "جدول 10%", L5: "جدول 5%", Z: "صف�
         ["bc", "الباركود"],
         ["ecode", "كود الصنف الضريبي (GS1/EGS أو GPC)"],
         ["tx", "فئة الضريبة الافتراضية", "s", Object.keys(TXN).map((t) => [t, TXN[t]])],
+        ["trk", "تتبع الدفعات وتواريخ الصلاحية", "s", [["", "لا"], ["1", "نعم (غذائي / دوائي)"]]],
       ],
     },
     whs: {
@@ -3366,6 +3368,8 @@ function openMove(t) {
         cc: "",
         acc: "",
         p: "",
+        lot: "",
+        exp: "",
       }),
         (MV.cost = defCost()));
     else {
@@ -3383,6 +3387,8 @@ function openMove(t) {
         cc: e.cc || "",
         acc: e.acc || "",
         p: e.p || "",
+        lot: e.lot || "",
+        exp: e.exp || "",
       };
     }
     drawMove();
@@ -3439,6 +3445,7 @@ function drawMove() {
         : "") +
       r("qty", "الكمية" + (s && s.unit ? " (" + esc(s.unit) + ")" : ""), i) +
       (e ? "" : r("cost", "تكلفة الوحدة", i)) +
+      (!e && zbIsTrk(t.item) ? (a ? r("lot", "رقم الدفعة") + r("exp", "تاريخ الصلاحية", 'type="date"') : r("lot", "من دفعة رقم (اختياري)")) : "") +
       '<label style="grid-column:1/-1">البيان<input id="m_desc" data-mv="desc" value="' +
       esc(t.desc) +
       '"></label></div><p class="note">المتاح في المخزن: <b>' +
@@ -3533,7 +3540,11 @@ function saveMove() {
       acc: d ? t.acc : "",
       p: d ? t.p : "",
       je: "",
+      lot: zbIsTrk(t.item) && !s ? String(t.lot || "").trim() : "",
+      exp: zbIsTrk(t.item) && !s && o ? t.exp || "" : "",
     };
+  if (zbIsTrk(t.item) && !s && o && !m.exp) return e("أدخل تاريخ الصلاحية للدفعة.");
+  if (m.exp && !okDate(m.exp)) return e("تاريخ الصلاحية غير صحيح.");
   if (d) {
     "" === p && (p = S.journal.reduce((t, e) => Math.max(t, parseInt(e.no) || 0), 0) + 1);
     const e = t.p ? t.p.split(":") : [],
@@ -4546,7 +4557,8 @@ function postInv(t, e) {
   e.ls.forEach((c, o) => {
     const l = r2(num(c.qty) * (num(c.uf) || 1) * 1e3) / 1e3,
       r = c.item ? IX.it.get(c.item) : null,
-      i = e.nets[o];
+      i = e.nets[o],
+      zbLn = c;
     let d;
     if (
       ((d = s ? c.acc || (n && mapAcc("sret")) || mapAcc("sal") : r ? b : c.acc), h.set(d, r2((h.get(d) || 0) + i)), r)
@@ -4576,6 +4588,8 @@ function postInv(t, e) {
           p: "",
           je: "",
           dc: t.id,
+          lot: "وارد" === o && !s && !n && zbIsTrk(r.code) ? String(zbLn.lot || "").trim() || docLabel(t) : "",
+          exp: "وارد" === o && !s && !n && zbIsTrk(r.code) ? zbLn.exp || "" : "",
         }));
     }
   });
@@ -4810,6 +4824,9 @@ function drawDoc() {
             '" value="' +
             esc(e.desc) +
             '"></label>' +
+            (!s && !DOCT[t.t].ret && e.item && zbIsTrk(e.item)
+              ? '<label>رقم الدفعة<input data-dl="lot" data-i="' + a + '" value="' + esc(e.lot || "") + '" placeholder="تلقائي"></label><label>تاريخ الصلاحية<input type="date" data-dl="exp" data-i="' + a + '" value="' + esc(e.exp || "") + '"></label>'
+              : "") +
             (S.meta.country
               ? '<label>فئة الضريبة<select data-dl="tx" data-i="' + a + '">' + txOpts(e.tx, t) + "</select></label>"
               : "") +
@@ -5063,6 +5080,21 @@ function commitDoc(t) {
         return n("الكمية المتاحة من «" + nm("it", s) + "» في هذا المخزن " + (o > 0 ? fq(o) : "صفر") + " فقط.");
     }
   }
+  if (!a && !s)
+    for (const x of o.ls)
+      if (x.item && zbIsTrk(x.item)) {
+        if (!x.exp) return n("«" + nm("it", x.item) + "»: أدخل تاريخ الصلاحية للدفعة.");
+        if (!okDate(x.exp)) return n("«" + nm("it", x.item) + "»: تاريخ الصلاحية غير صحيح.");
+      }
+  if (a && !s && l) {
+    const q = new Map();
+    o.ls.forEach((x) => x.item && zbIsTrk(x.item) && q.set(x.item, (q.get(x.item) || 0) + num(x.qty) * (num(x.uf) || 1)));
+    for (const [it, need] of q) {
+      const av = zbLotAvail(it, t.wh, t.date, t.id);
+      if (need > av + 5e-4)
+        return n("«" + nm("it", it) + "»: المتاح غير منتهي الصلاحية في هذا المخزن " + (av > 0 ? fq(av) : "صفر") + " فقط (الباقي منتهي — أعدمه من شاشة الدُفعات).");
+    }
+  }
   const d = IX.doc.get(t.id),
     p = t.isNew && !s ? num(t.payNow) : 0;
   if (p < 0) return n("المبلغ المحصَّل لا يكون سالباً.");
@@ -5086,6 +5118,8 @@ function commitDoc(t) {
         price: num(t.price),
         acc: t.item ? "" : t.acc || "",
         tx: t.tx && "S" !== t.tx ? t.tx : "S",
+        lot: String(t.lot || "").trim(),
+        exp: t.exp || "",
       }))
       .map((t, e) => {
         const a = o.ls[e];
@@ -8118,11 +8152,11 @@ const okDate = (t) => /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(t || 
   const t = saveMove;
   saveMove = function () {
     const e = null != MV.i ? S.moves[MV.i] : null,
-      a = lockChk([MV.date, e && e.date]);
+      a = lockChk([MV.date, e && e.date]),
+      m = { date: MV.date, item: MV.item, qty: MV.qty };
     a
       ? ($("#err").textContent = a)
-      : (t(),
-        errTxt() || aud(e ? "تعديل" : "إنشاء", "حركة مخزون", MV.date + " · " + nm("it", MV.item) + " × " + MV.qty));
+      : (t(), errTxt() || aud(e ? "تعديل" : "إنشاء", "حركة مخزون", m.date + " · " + nm("it", m.item) + " × " + m.qty));
   };
 }
 document.addEventListener("change", (t) => {
@@ -20067,6 +20101,123 @@ async function syBoot() {
         { row: (r) => 'class="click" data-act="qt_open" data-id="' + esc(r.id) + '"' },
       )
     );
+  };
+})();
+
+/* ====== الدُفعات وتواريخ الصلاحية (FEFO) ====== */
+(function () {
+  V.lt = { q: "", wh: "", show: "" };
+  const isTrk = (c) => {
+      const i = IX.it.get(c);
+      return !!i && "1" === i.trk;
+    },
+    expDays = () => (num(S.meta.expDays) > 0 ? num(S.meta.expDays) : 60),
+    addD = (d, n) => {
+      const x = new Date(d + "T00:00:00");
+      x.setDate(x.getDate() + n);
+      return x.getFullYear() + "-" + String(x.getMonth() + 1).padStart(2, "0") + "-" + String(x.getDate()).padStart(2, "0");
+    };
+  /* حساب أرصدة الدُفعات من حركات المخزون (دائماً متطابق مع المخزون لأنه مُشتق منها) */
+  function lotRows(excl) {
+    const W = new Map(),
+      get = (i, w) => {
+        const k = i + "|" + w;
+        let a = W.get(k);
+        return (a || W.set(k, (a = [])), a);
+      },
+      add = (arr, lot, exp, q) => {
+        let x = arr.find((y) => y.lot === lot && y.exp === exp);
+        x || arr.push((x = { lot, exp, qty: 0 }));
+        x.qty += q;
+      },
+      take = (arr, q, date, pref) => {
+        const rank = (x) => (pref && x.lot === pref ? 0 : x.exp && x.exp >= date ? 1 : x.exp ? 3 : 2),
+          order = arr.slice().sort((a, b) => rank(a) - rank(b) || (a.exp < b.exp ? -1 : a.exp > b.exp ? 1 : 0)),
+          out = [];
+        let rem = q;
+        for (const x of order) {
+          if (rem <= 5e-4) break;
+          if (x.qty <= 5e-4) continue;
+          const t = Math.min(x.qty, rem);
+          x.qty -= t;
+          rem -= t;
+          out.push({ lot: x.lot, exp: x.exp, qty: t });
+        }
+        return { out, rem };
+      };
+    const trk = new Set(S.items.filter((i) => "1" === i.trk).map((i) => i.code));
+    if (!trk.size) return [];
+    const mv = S.moves
+      .filter((m) => trk.has(m.item) && (!excl || m.dc !== excl))
+      .slice()
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.no || 0) - (b.no || 0)));
+    for (const m of mv) {
+      if ("تحويل" === m.type) {
+        const r = take(get(m.item, m.wh), m.qty, m.date, m.lot),
+          to = get(m.item, m.wh2);
+        r.out.forEach((x) => add(to, x.lot, x.exp, x.qty));
+        r.rem > 5e-4 && add(to, "", "", r.rem);
+      } else if (IN.has(m.type)) add(get(m.item, m.wh), m.lot || "", m.exp || "", m.qty);
+      else take(get(m.item, m.wh), m.qty, m.date, m.lot);
+    }
+    const rows = [];
+    W.forEach((arr, k) => {
+      const [item, wh] = k.split("|");
+      arr.forEach((x) => x.qty > 5e-4 && rows.push({ item, wh, lot: x.lot, exp: x.exp, qty: r2(x.qty * 1e3) / 1e3 }));
+    });
+    return rows;
+  }
+  window.zbLotRows = lotRows;
+  /* المتاح غير المنتهي (أو بدون دفعة) لصنف في مخزن بتاريخ معيّن */
+  window.zbLotAvail = (item, wh, date, excl) =>
+    lotRows(excl)
+      .filter((r) => r.item === item && r.wh === wh && (!r.exp || r.exp >= date))
+      .reduce((s, r) => s + r.qty, 0);
+  window.zbIsTrk = isTrk;
+  /* ---- الشاشة ---- */
+  VIEWS.lots = () => {
+    const f = V.lt,
+      t0 = today(),
+      lim = addD(t0, expDays()),
+      q = f.q.trim(),
+      all = lotRows().map((r) => {
+        const it = IX.it.get(r.item) || {},
+          dl = r.exp ? Math.round((new Date(r.exp) - new Date(t0)) / 864e5) : null,
+          s = !r.exp ? ["بدون تاريخ", ""] : r.exp < t0 ? ["منتهي", "bad"] : r.exp <= lim ? ["قريب الانتهاء", "warn"] : ["سليم", "good"];
+        return Object.assign({}, r, { iname: it.name || r.item, wname: nm("wh", r.wh), dl, st: s, val: r2(r.qty * (it.cost || 0)) });
+      }),
+      rows = all
+        .filter((r) => (!f.wh || r.wh === f.wh) && (!f.show || r.st[0] === f.show) && (!q || (r.iname + " " + r.lot).includes(q)))
+        .sort((a, b) => (a.exp || "9999") < (b.exp || "9999") ? -1 : (a.exp || "9999") > (b.exp || "9999") ? 1 : 0),
+      exp = all.filter((r) => "منتهي" === r.st[0]),
+      near = all.filter((r) => "قريب الانتهاء" === r.st[0]);
+    return (
+      '<div class="grid kpis"><div class="kpi"><small>دُفعات منتهية الصلاحية</small><b class="' + (exp.length ? "neg" : "") + '">' + exp.length + "</b><i>" + fmt(exp.reduce((s, r) => s + r.val, 0)) + '</i></div><div class="kpi"><small>قريبة الانتهاء (' + expDays() + ' يوم)</small><b>' + near.length + "</b><i>" + fmt(near.reduce((s, r) => s + r.val, 0)) + "</i></div></div>" +
+      (S.items.some((i) => "1" === i.trk) ? "" : '<p class="note">لتفعيل تتبع الدُفعات: افتح الصنف واختر «تتبع الدفعات وتواريخ الصلاحية = نعم»، ثم أدخل رقم الدفعة وتاريخ الصلاحية عند الشراء.</p>') +
+      '<div class="bar"><label>المخزن<select data-set="lt.wh"><option value="">الكل</option>' + S.whs.map((w) => '<option value="' + esc(w.code) + '"' + (f.wh === w.code ? " selected" : "") + ">" + esc(w.name) + "</option>").join("") + '</select></label><label>الحالة<select data-set="lt.show"><option value="">الكل</option>' + ["منتهي", "قريب الانتهاء", "سليم", "بدون تاريخ"].map((s) => "<option" + (f.show === s ? " selected" : "") + ">" + s + "</option>").join("") + '</select></label><label>بحث<input type="search" id="ltq" data-set="lt.q" data-live value="' + esc(f.q) + '" placeholder="صنف أو رقم دفعة"></label><label>تنبيه قبل (يوم)<input type="number" min="1" data-meta="expDays" value="' + esc(S.meta.expDays || "") + '" placeholder="60" style="width:80px"></label><span class="sp"></span>' + xbtn() + "</div>" +
+      table(
+        "الدُفعات وتواريخ الصلاحية",
+        [
+          { k: "iname", t: "الصنف" },
+          { k: "wname", t: "المخزن" },
+          { k: "lot", t: "رقم الدفعة", h: (r) => esc(r.lot || "—") },
+          { k: "exp", t: "الصلاحية", h: (r) => esc(r.exp || "—") },
+          { k: "dl", t: "الأيام المتبقية", n: 1, h: (r) => (null == r.dl ? "—" : String(r.dl)) },
+          { k: "qty", t: "الكمية", n: 1, h: (r) => fq(r.qty) },
+          { k: "val", t: "القيمة", n: 1 },
+          { k: "st", t: "الحالة", h: (r) => '<span class="chip ' + r.st[1] + '">' + r.st[0] + "</span>" },
+          { k: "x", t: "", h: (r) => ("منتهي" === r.st[0] ? '<button class="btn sm danger" data-act="lot_wo" data-i="' + esc(r.item) + '" data-w="' + esc(r.wh) + '" data-l="' + esc(r.lot) + '" data-q="' + r.qty + '">إعدام / تسوية</button>' : "") },
+        ],
+        rows,
+      )
+    );
+  };
+  A.lot_wo = (el) => {
+    openMove();
+    if (!MV) return;
+    const it = IX.it.get(el.dataset.i);
+    Object.assign(MV, { type: "منصرف", item: el.dataset.i, wh: el.dataset.w, qty: el.dataset.q, lot: el.dataset.l, desc: "إعدام دفعة منتهية الصلاحية " + (el.dataset.l || ""), cost: String(r2(avgOf(stock().get(el.dataset.i), it))) });
+    drawMove();
   };
 })();
 
