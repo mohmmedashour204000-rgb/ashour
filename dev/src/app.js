@@ -3113,10 +3113,11 @@ function entryTot() {
     (a ? (t ? "متزن ✓" : "بدون مبالغ") : "الفرق " + fmt(t - e)) +
     "</span>";
 }
+function zbFutureErr(d) {
+  return d && d > today() ? "لا يمكن استخدام تاريخ مستقبلي (" + d + ") — تاريخ اليوم " + today() + "." : "";
+}
 function zbTomorrow() {
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  return today();
 }
 function zbLeafErr(c) {
   const x = IX.acc.get(c);
@@ -3168,6 +3169,7 @@ function saveEntry(t) {
     s = String(e.no).trim();
   if (!s) return a("رقم القيد مطلوب.");
   if (!e.date) return a("تاريخ القيد مطلوب.");
+  if (zbFutureErr(e.date)) return a("لا يمكن تسجيل قيد بتاريخ مستقبلي (" + e.date + ") — تاريخ اليوم " + today() + ".");
   const n = e.lines.filter((t) => t.a || num(t.d) || num(t.c));
   if (n.length < 2) return a("القيد يحتاج سطرين على الأقل: مدين ودائن.");
   for (const t of n) {
@@ -3500,6 +3502,7 @@ function saveMove() {
     c = IX.it.get(t.item),
     o = IN.has(t.type);
   if (!t.date || !c || !IX.wh.get(t.wh)) return e("التاريخ والصنف والمخزن مطلوبة.");
+  if (zbFutureErr(t.date)) return e("لا يمكن تسجيل حركة بتاريخ مستقبلي (" + t.date + ").");
   if (!(a > 0)) return e("أدخل كمية أكبر من صفر.");
   if (n < 0) return e("التكلفة لا تكون سالبة.");
   if (s && (!IX.wh.get(t.wh2) || t.wh2 === t.wh)) return e("اختر مخزناً مختلفاً للتحويل إليه.");
@@ -5034,7 +5037,7 @@ function commitDoc(t) {
   if (authWhCode() && t.wh && t.wh !== authWhCode())
     return n("مسموح لك بالتعامل مع مخزنك فقط: «" + nm("wh", authWhCode()) + "».");
   if (!t.date) return n("التاريخ مطلوب.");
-  if (t.date > zbTomorrow()) return n("تاريخ الفاتورة في المستقبل — راجع التاريخ.");
+  if (zbFutureErr(t.date)) return n("لا يمكن إصدار فاتورة بتاريخ مستقبلي (" + t.date + ").");
   if (!t.party) return n("اختر " + (a ? "العميل" : "المورد") + ".");
   const c = parseInt(t.no);
   if (!(c > 0)) return n("رقم المستند غير صحيح.");
@@ -5335,6 +5338,7 @@ function saveV() {
   if (S.docs.some((e) => e.t === t.t && e.no === a && e.id !== t.id))
     return e("الرقم " + DOCT[t.t].p + "-" + a + " مستخدم من قبل.");
   if (!t.date) return e("التاريخ مطلوب.");
+  if (zbFutureErr(t.date)) return e("لا يمكن تسجيل سند بتاريخ مستقبلي (" + t.date + ").");
   {
     const o0 = IX.doc.get(t.id);
     if (o0 && o0.chq) return e("هذا السند ناتج عن شيك — عدّله من شاشة الشيكات.");
@@ -9001,7 +9005,8 @@ function drawRun() {
       if (bad)
         return ($("#err").textContent = "راجع الموظف «" + bad.name + "»: الصافي أو الإضافي أو الخصومات بالسالب.");
     }
-    const e = eom(PR.m),
+    if (PR.m > today().slice(0, 7)) return ($("#err").textContent = "لا يمكن ترحيل مسير رواتب لشهر قادم (" + PR.m + ").");
+    const e = eom(PR.m) > today() ? today() : eom(PR.m),
       a = lockChk([e]);
     if (a) return ($("#err").textContent = a);
     const s = nextJ(),
@@ -19535,7 +19540,7 @@ async function syBoot() {
     if (!okDate(c.date)) return "تاريخ التحرير غير صحيح.";
     if (!okDate(c.due)) return "تاريخ الاستحقاق غير صحيح.";
     if (c.due < c.date) return "تاريخ الاستحقاق قبل تاريخ التحرير.";
-    if (c.date > zbTomorrow()) return "تاريخ التحرير في المستقبل — راجع التاريخ.";
+    if (zbFutureErr(c.date)) return "لا يمكن تسجيل شيك بتاريخ تحرير مستقبلي — سجّل الشيك المؤجل بتاريخ اليوم وتاريخ استحقاق لاحق.";
     if (!(c.amt > 0)) return "أدخل مبلغاً أكبر من صفر.";
     if (c.amt >= 1e12) return "المبلغ كبير بشكل غير منطقي.";
     if (!c.party) return "اختر " + (isIn(c) ? "العميل الساحب" : "المورد المستفيد") + ".";
@@ -19717,7 +19722,7 @@ async function syBoot() {
       acc = CQ.acc;
     if (!okDate(d)) return err("التاريخ غير صحيح.");
     if (d < c.date) return err("تاريخ العملية قبل تاريخ تحرير الشيك.");
-    if (d > zbTomorrow()) return err("التاريخ في المستقبل.");
+    if (zbFutureErr(d)) return err("لا يمكن تسجيل التحصيل/الصرف بتاريخ مستقبلي.");
     const le = zbLeafErr(acc);
     if (le) return err(le);
     if (!IX.acc.get(c.acc)) return err("حساب الشيكات غير موجود.");
@@ -19943,6 +19948,7 @@ async function syBoot() {
     if (!(no > 0)) return err("رقم المستند غير صحيح.");
     if (list().some((x) => x.ty === r.ty && x.no === no && x.id !== r.id)) return err("الرقم " + TY[r.ty].p + "-" + no + " مستخدم من قبل.");
     if (!okDate(r.date)) return err("التاريخ غير صحيح.");
+    if (zbFutureErr(r.date)) return err("لا يمكن استخدام تاريخ مستقبلي لتاريخ المستند (" + r.date + ").");
     if (r.valid && (!okDate(r.valid) || r.valid < r.date)) return err("تاريخ الصلاحية/التسليم غير صحيح.");
     if (!r.party || !IX.cu.get(r.party)) return err("اختر العميل.");
     const lines = r.lines.filter((l) => num(l.qty) > 0 || num(l.price) > 0 || l.item || String(l.desc || "").trim());
