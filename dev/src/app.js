@@ -19149,9 +19149,142 @@ async function syBoot() {
       logErr(e, "health");
     }
   }, 9000);
+  /* ---------- لقطات السيرفر (نسخ احتياطية كاملة خارج الجهاز) ---------- */
+  const SRV_DAY = "srvSnapDay",
+    PART = 600000;
+  const b64 = (buf) => {
+      const u = new Uint8Array(buf);
+      let s = "";
+      for (let i = 0; i < u.length; i += 32768) s += String.fromCharCode.apply(null, u.subarray(i, i + 32768));
+      return btoa(s);
+    },
+    unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+  const srvOk = () => typeof SYNC !== "undefined" && SYNC && SYNC.on && SYNC.code;
+  let srvBusy = false;
+  async function srvUp(why) {
+    if (!srvOk()) throw new Error("المزامنة غير مفعّلة.");
+    if (srvBusy) throw new Error("جارٍ رفع نسخة بالفعل.");
+    srvBusy = true;
+    try {
+      const json = JSON.stringify(snapshot()),
+        g = await gz(json),
+        raw = g.gz ? g.b : new TextEncoder().encode(json).buffer,
+        data = (g.gz ? "G1:" : "R1:") + b64(raw),
+        n = Math.ceil(data.length / PART),
+        id = String(Date.now());
+      if (n > 40) throw new Error("حجم البيانات أكبر من الحد المسموح للنسخة على السيرفر.");
+      for (let i = 0; i < n; i++)
+        await syApi("snap/put", { id, part: i + 1, n, d: data.slice(i * PART, (i + 1) * PART), sz: json.length }, 6e4);
+      await KV.set(SRV_DAY, today()).catch(() => {});
+      return { id, n, kb: Math.round(data.length / 1024) };
+    } finally {
+      srvBusy = false;
+    }
+  }
+  async function srvGet(id) {
+    const first = await syApi("snap/get", { id, part: 1 }, 6e4);
+    let data = first.d;
+    for (let i = 2; i <= first.n; i++) data += (await syApi("snap/get", { id, part: i }, 6e4)).d;
+    const kind = data.slice(0, 3),
+      body = data.slice(3);
+    if (kind === "G1:") return JSON.parse(await ungz({ gz: 1, b: unb64(body) }));
+    if (kind === "R1:") return JSON.parse(new TextDecoder().decode(unb64(body)));
+    throw new Error("صيغة النسخة غير معروفة.");
+  }
+  window.zbSrvUp = srvUp;
+  window.zbSrvGet = srvGet;
+  async function srvAuto() {
+    try {
+      if (!srvOk() || SYNC.firstPull || SYNC.busy || SYNC.canWrite === false || navigator.onLine === false) return;
+      if (!hasData() || (await KV.get(SRV_DAY).catch(() => null)) === today()) return;
+      await srvUp("auto");
+    } catch (e) {
+      logErr(e, "srvsnap");
+    }
+  }
+  setTimeout(srvAuto, 90000);
+  setInterval(srvAuto, 1800000);
+  const fmtKb = (b) => (b > 1048576 ? (b / 1048576).toFixed(1) + " م.ب" : Math.max(1, Math.round(b / 1024)) + " ك.ب");
+  async function srvFill() {
+    const box = document.getElementById("rp_srv");
+    if (!box) return;
+    if (!srvOk()) {
+      box.innerHTML =
+        '<p class="note">نسخ السيرفر تعمل مع المزامنة السحابية (تحتاج ترخيصاً مفعّلاً). فعّل المزامنة من هذه الصفحة ليأخذ البرنامج نسخة كاملة كل يوم على السيرفر وتقدر ترجع لأي منها.</p>';
+      return;
+    }
+    box.innerHTML = '<p class="note">جارٍ تحميل قائمة نسخ السيرفر…</p>';
+    try {
+      const r = await syApi("snap/list", {}, 2e4),
+        L = (r.snaps || []).filter((x) => x.complete);
+      box.innerHTML =
+        '<p class="note">آخر رفع من هذا الجهاز: <b>' +
+        esc((await KV.get(SRV_DAY).catch(() => null)) || "لم يتم بعد") +
+        "</b></p>" +
+        (L.length
+          ? "<table><thead><tr><th>التاريخ</th><th>الحجم</th><th></th></tr></thead><tbody>" +
+            L.map(
+              (x) =>
+                "<tr><td>" +
+                esc(new Date(+x.id).toLocaleString("ar-EG")) +
+                '</td><td class="num">' +
+                fmtKb(x.bytes || 0) +
+                '</td><td><button class="btn sm" data-act="rp_srvrestore" data-k="' +
+                esc(x.id) +
+                '">استرجاع</button> <button class="btn sm" data-act="rp_srvdl" data-k="' +
+                esc(x.id) +
+                '">تنزيل</button></td></tr>',
+            ).join("") +
+            "</tbody></table>"
+          : '<p class="note">لا توجد نسخ على السيرفر بعد. اضغط «رفع نسخة للسيرفر الآن».</p>');
+    } catch (e) {
+      box.innerHTML = '<p class="note neg">تعذّر تحميل قائمة النسخ: ' + esc((e && e.message) || "خطأ") + "</p>";
+    }
+  }
+  A.rp_srvup = async () => {
+    if (!srvOk()) return toast("فعّل المزامنة السحابية أولاً.");
+    if (!hasData()) return toast("لا توجد بيانات بعد.");
+    toast("جارٍ رفع النسخة…");
+    try {
+      const r = await srvUp("يدوي");
+      toast("تم رفع نسخة (" + r.kb + " ك.ب) للسيرفر ✓");
+      srvFill();
+    } catch (e) {
+      toast("تعذّر الرفع: " + ((e && e.message) || "خطأ"));
+    }
+  };
+  A.rp_srvlist = () => srvFill();
+  A.rp_srvdl = async (el) => {
+    try {
+      toast("جارٍ التنزيل…");
+      saveFile("server-backup-" + today() + ".json", JSON.stringify(await srvGet(el.dataset.k)), "application/json");
+    } catch (e) {
+      toast("تعذّر التنزيل: " + ((e && e.message) || "خطأ"));
+    }
+  };
+  A.rp_srvrestore = (el) => {
+    const id = el.dataset.k;
+    ask(
+      "استرجاع هذه النسخة من السيرفر؟ هتتبدل بياناتك الحالية بها (وبياخد نقطة من بياناتك الحالية قبلها). لو المزامنة شغالة، التغيير هيوصل للأجهزة التانية كمان.",
+      "استرجاع",
+      async () => {
+        try {
+          toast("جارٍ تنزيل النسخة…");
+          const obj = await srvGet(id);
+          if (!obj || !obj.meta) return toast("ملف النسخة غير سليم.");
+          if (SYNC && SYNC.on) SYNC.allowMass = !0;
+          replaceAll(obj);
+          toast("تم الاسترجاع من نسخة السيرفر");
+        } catch (e) {
+          logErr(e, "srvrestore");
+          toast("تعذّر الاسترجاع: " + ((e && e.message) || "خطأ"));
+        }
+      },
+    );
+  };
   /* ---------- بطاقة الإعدادات ---------- */
   const card = () =>
-    '<div class="card" id="rp_card"><h3>الحماية ونقاط الاسترجاع</h3><p class="note">البرنامج بياخد نسخة تلقائية من بياناتك على هذا الجهاز (يومياً تقريباً، وقبل أي مسح أو استرجاع أو استيراد). لو حصل خطأ أو مسحت بالغلط، ارجع لأي نقطة. دي مش بديل للنسخة الاحتياطية على فلاشة أو إيميل.</p><div class="bar"><button class="btn pri" data-act="rp_now">أخذ نقطة استرجاع الآن</button><button class="btn" data-act="rp_health">فحص سلامة البيانات</button><button class="btn" data-act="rp_errs">تقرير الأخطاء</button></div><div id="rp_out"></div><div id="rp_box" class="tw"></div></div>';
+    '<div class="card" id="rp_card"><h3>الحماية ونقاط الاسترجاع</h3><p class="note">البرنامج بياخد نسخة تلقائية من بياناتك على هذا الجهاز (يومياً تقريباً، وقبل أي مسح أو استرجاع أو استيراد). لو حصل خطأ أو مسحت بالغلط، ارجع لأي نقطة. دي مش بديل للنسخة الاحتياطية على فلاشة أو إيميل.</p><div class="bar"><button class="btn pri" data-act="rp_now">أخذ نقطة استرجاع الآن</button><button class="btn" data-act="rp_health">فحص سلامة البيانات</button><button class="btn" data-act="rp_errs">تقرير الأخطاء</button></div><div id="rp_out"></div><div id="rp_box" class="tw"></div><h4 style="margin:14px 0 4px">نسخ السيرفر (خارج الجهاز)</h4><p class="note">مع المزامنة السحابية بياخد البرنامج نسخة كاملة يومياً على السيرفر ويحتفظ بآخر 10. تنفع لو الجهاز ضاع أو اتمسحت بيانات بالغلط ووصل المسح للمزامنة.</p><div class="bar"><button class="btn" data-act="rp_srvup">رفع نسخة للسيرفر الآن</button><button class="btn" data-act="rp_srvlist">عرض نسخ السيرفر</button></div><div id="rp_srv" class="tw"></div></div>';
   async function fill() {
     const box = document.getElementById("rp_box");
     if (!box) return;

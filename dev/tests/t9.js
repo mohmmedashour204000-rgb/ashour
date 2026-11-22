@@ -1,0 +1,10 @@
+const h=require('./h');
+(async()=>{const {b,p,errs}=await h.open(process.argv[2]||'stores/');
+const o=await p.evaluate(async()=>{const o={};const L=window.__lic;o.state=L.get();
+ const enc=s=>btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+ const pl=enc(JSON.stringify({n:'x',e:'all',d:L.dev(),x:'2099-01-01'}));
+ o.forgedSig=(await L.verify(pl+'.'+enc('A'.repeat(64)))).why||'ACCEPTED';
+ o.garbage=(await L.verify('abc')).why||'ACCEPTED';
+ o.empty=(await L.verify('')).why||'ACCEPTED';
+ return o});
+console.log(JSON.stringify(o,null,1),errs.slice(0,3));await b.close()})();

@@ -2,7 +2,7 @@
    POST /api/ping | /api/sync/{init,join,push,pull,status}
    A company is identified by SHA-256(sync code); the code itself is never stored. */
 const PUB={"kty":"EC","crv":"P-256","x":"2iMXRKPeHcTUdihK4uPe5fq8g5M_xTYNNxJ1UzYxJUA","y":"mRQN8msU0ZWN-v30Mg1dXwlBgOvSQZymS5lQJt5vHyw"};
-const GRACE_DAYS=14,MAX_OPS=200,MAX_PULL=400;
+const GRACE_DAYS=14,MAX_OPS=200,MAX_PULL=400,SNAP_KEEP=10,SNAP_PART=700000,SNAP_MAXN=40;
 const H={'access-control-allow-origin':'*','access-control-allow-headers':'content-type,authorization','access-control-allow-methods':'POST,OPTIONS','access-control-max-age':'86400'};
 const J=(o,s)=>new Response(JSON.stringify(o),{status:s||200,headers:Object.assign({'content-type':'application/json; charset=utf-8','cache-control':'no-store'},H)});
 let READY=false;
@@ -13,7 +13,8 @@ async function ensure(db){if(READY)return;
     db.prepare("CREATE INDEX IF NOT EXISTS rec_seq ON records(cid,seq)"),
     db.prepare("CREATE TABLE IF NOT EXISTS devices(dev TEXT PRIMARY KEY,first INTEGER NOT NULL,last INTEGER NOT NULL,opens INTEGER NOT NULL DEFAULT 1,ed TEXT,ver TEXT,lic TEXT,licn TEXT,exp TEXT,fp TEXT,iph TEXT)"),
     db.prepare("CREATE INDEX IF NOT EXISTS dev_fp ON devices(fp,iph)"),
-    db.prepare("CREATE TABLE IF NOT EXISTS revoked(h TEXT PRIMARY KEY,at INTEGER,note TEXT)")]);
+    db.prepare("CREATE TABLE IF NOT EXISTS revoked(h TEXT PRIMARY KEY,at INTEGER,note TEXT)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS snaps(cid TEXT NOT NULL,id TEXT NOT NULL,part INTEGER NOT NULL,n INTEGER NOT NULL,d TEXT NOT NULL,at INTEGER NOT NULL,sz INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(cid,id,part))")]);
   READY=true}
 const b64u=s=>{s=String(s).replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';const r=atob(s),u=new Uint8Array(r.length);for(let i=0;i<r.length;i++)u[i]=r.charCodeAt(i);return u};
 async function sha(s){const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));return[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('')}
@@ -80,6 +81,26 @@ export async function onRequest({request,env}){
     const rows=rs.results||[],last=rows.length?rows[rows.length-1].seq:since;
     const body='{"ok":1,"ops":['+rows.map(r=>'{"l":'+JSON.stringify(r.l)+',"k":'+JSON.stringify(r.k)+',"rev":'+r.rev+',"seq":'+r.seq+',"del":'+(r.del?1:0)+',"d":'+(r.d||'null')+'}').join(',')+'],"seq":'+c.seq+',"cursor":'+last+',"more":'+((rows.length>=lim&&last<c.seq)?'true':'false')+',"canWrite":'+(canWrite(c)?'true':'false')+'}';
     return new Response(body,{status:200,headers:Object.assign({'content-type':'application/json; charset=utf-8','cache-control':'no-store'},H)})}
+  /* Full-data snapshots (gzip+base64 chunks). Reading is always allowed (even after expiry) so a customer can get their data back; writing needs a live subscription. */
+  if(route==='sync/snap/put'){
+    if(!canWrite(c))return J({err:'expired',msg:'انتهى اشتراك الشركة: لا يمكن رفع نسخ جديدة.',exp:c.exp},402);
+    const id=String(b.id||''),part=+b.part,n=+b.n,d=b.d;
+    if(!/^\d{13}$/.test(id)||!(n>=1&&n<=SNAP_MAXN)||!Number.isInteger(part)||part<1||part>n||typeof d!=='string'||!d.length||d.length>SNAP_PART+1000)return J({err:'snap',msg:'بيانات النسخة غير صحيحة.'},400);
+    await db.prepare('INSERT OR REPLACE INTO snaps(cid,id,part,n,d,at,sz) VALUES(?1,?2,?3,?4,?5,?6,?7)').bind(cid,id,part,n,d,Date.now(),Math.max(0,+b.sz||0)).run();
+    if(part===n){
+      const rows=(await db.prepare('SELECT id,n,COUNT(*) c,MAX(at) at FROM snaps WHERE cid=? GROUP BY id ORDER BY id DESC').bind(cid).all()).results||[];
+      let kept=0;for(const r of rows){const full=r.c===r.n;
+        if(full&&kept<SNAP_KEEP){kept++;continue}
+        if(full||Date.now()-r.at>36e5)await db.prepare('DELETE FROM snaps WHERE cid=? AND id=?').bind(cid,r.id).run()}}
+    return J({ok:1})}
+  if(route==='sync/snap/list'){
+    const rows=(await db.prepare('SELECT id,n,COUNT(*) c,MAX(at) at,MAX(sz) sz,SUM(LENGTH(d)) bytes FROM snaps WHERE cid=? GROUP BY id ORDER BY id DESC LIMIT 30').bind(cid).all()).results||[];
+    return J({ok:1,snaps:rows.map(r=>({id:r.id,n:r.n,parts:r.c,complete:r.c===r.n,at:r.at,sz:r.sz,bytes:r.bytes}))})}
+  if(route==='sync/snap/get'){
+    const id=String(b.id||''),part=+b.part||1;
+    const r=await db.prepare('SELECT d,n FROM snaps WHERE cid=?1 AND id=?2 AND part=?3').bind(cid,id,part).first();
+    if(!r)return J({err:'nosnap',msg:'النسخة غير موجودة.'},404);
+    return J({ok:1,d:r.d,n:r.n,part})}
   if(route==='sync/push'){
     if(b.lic){const lic=await checkLic(b.lic,b.dev);if(lic.ok&&lic.exp>c.exp){c.exp=lic.exp;await db.prepare('UPDATE companies SET exp=? WHERE id=?').bind(lic.exp,cid).run()}}
     if(!canWrite(c))return J({err:'expired',msg:'انتهى اشتراك الشركة: المزامنة للقراءة فقط. جدّد الترخيص لمتابعة الرفع.',exp:c.exp},402);
