@@ -72,6 +72,7 @@ const LISTS = [
     "boms",
     "leaves",
     "cheques",
+    "quotes",
   ],
   CHUNK = { audit: 300, journal: 150, inst: 400, moves: 300, items: 400, docs: 150 };
 let S = {
@@ -859,7 +860,10 @@ const ICON = {
       t: "المبيعات",
       i: "cart",
       c: "#0e8a8a",
-      v: [["sales", "فواتير المبيعات"]],
+      v: [
+        ["sales", "فواتير المبيعات"],
+        ["quotes", "عروض الأسعار وأوامر البيع"],
+      ],
       s: () => S.docs.filter((t) => "inv" === t.kind && DOCT[t.t].sale).length + " فاتورة",
     },
     {
@@ -5088,6 +5092,7 @@ function commitDoc(t) {
         return (num(a.uf) > 1 && ((t.ul = String(a.ul || "")), (t.uf = num(a.uf))), t);
       }),
     ref: t.ref || "",
+    qref: t.qref || "",
     disc: o.disc,
     vat: num(t.vat),
     sub: o.sub,
@@ -18124,6 +18129,7 @@ const SY_LISTS = [
     "boms",
     "leaves",
     "cheques",
+    "quotes",
   ],
   SY_LOCALM = new Set([
     "bkDate",
@@ -18163,6 +18169,7 @@ const SY_LISTS = [
     boms: "قائمة مواد",
     leaves: "طلب إجازة",
     cheques: "شيك",
+    quotes: "عرض سعر / أمر بيع",
     meta: "الإعدادات",
   },
   syKey = {
@@ -18188,6 +18195,7 @@ const SY_LISTS = [
     boms: (t) => t.id,
     leaves: (t) => t.id,
     cheques: (t) => t.id,
+    quotes: (t) => t.id,
   };
 function syHash(t) {
   const e = JSON.stringify(t);
@@ -19787,6 +19795,276 @@ async function syBoot() {
         ],
         rows,
         { row: (c) => 'class="click" data-act="chq_open" data-id="' + esc(c.id) + '"' },
+      )
+    );
+  };
+})();
+
+/* ====== عروض الأسعار وأوامر البيع وإذن التسليم ====== */
+(function () {
+  V.qt = { ty: "", st: "", q: "", from: "", to: "" };
+  const TY = { quote: { n: "عرض سعر", p: "QT" }, order: { n: "أمر بيع", p: "SO" } },
+    list = () => S.quotes || (S.quotes = []),
+    byId = (id) => list().find((x) => x.id === id),
+    label = (r) => TY[r.ty].p + "-" + r.no,
+    cname = (r) => nm("cu", r.party),
+    calc = (r) => invCalc({ lines: r.lines || [], disc: r.disc, vat: r.vat }),
+    invsOf = (r) => S.docs.filter((d) => "inv" === d.kind && d.qref === r.id && !DOCT[d.t].ret && DOCT[d.t].sale),
+    key = (l) => (l.item ? "i:" + l.item : "d:" + String(l.desc || "").trim()),
+    deliveredMap = (r) => {
+      const m = new Map();
+      invsOf(r).forEach((d) => d.lines.forEach((l) => m.set(key(l), (m.get(key(l)) || 0) + num(l.qty) * (num(l.uf) || 1))));
+      return m;
+    },
+    remLines = (r) => {
+      const m = deliveredMap(r);
+      return (r.lines || [])
+        .filter((l) => num(l.qty) > 0)
+        .map((l) => {
+          const done = Math.min(m.get(key(l)) || 0, num(l.qty));
+          m.set(key(l), Math.max(0, (m.get(key(l)) || 0) - num(l.qty)));
+          return Object.assign({}, l, { done, rem: r2(num(l.qty) - done) });
+        });
+    },
+    stateOf = (r) => {
+      const inv = invsOf(r).length;
+      if ("order" === r.ty) {
+        if ("ملغي" === r.status) return ["ملغي", ""];
+        const L = remLines(r),
+          all = L.every((l) => l.rem <= 0.0005),
+          any = L.some((l) => l.done > 0);
+        return all && L.length ? ["مسلَّم بالكامل", "good"] : any ? ["مسلَّم جزئياً", "warn"] : ["مفتوح", "warn"];
+      }
+      if (inv) return ["محوّل لفاتورة", "good"];
+      if ("محوّل" === r.status) return ["محوّل لأمر بيع", "good"];
+      if (["مسودة", "مرسل"].includes(r.status) && r.valid && r.valid < today()) return ["منتهي", "bad"];
+      return [r.status, { مقبول: "good", مرفوض: "bad" }[r.status] || "warn"];
+    },
+    next = (ty) => nextIn(list().filter((x) => x.ty === ty).map((x) => x.no || 0));
+  let QT = null;
+  const fld = (l, i, sp) => "<label" + (sp ? ' style="grid-column:1/-1"' : "") + ">" + l + i + "</label>";
+  function draw() {
+    const r = QT,
+      c = calc(r),
+      st = r.ty === "quote";
+    modal(
+      "<header><h2>" + (r.isNew ? TY[r.ty].n + " جديد" : TY[r.ty].n + " " + label(r)) + '</h2><button class="btn sm" data-act="close">إغلاق</button></header><div class="body"><div class="form">' +
+        fld("الرقم", '<input type="number" min="1" data-qt="no" value="' + esc(r.no) + '">') +
+        fld("التاريخ", '<input type="date" data-qt="date" value="' + esc(r.date) + '">') +
+        fld(st ? "صالح حتى" : "تاريخ التسليم المطلوب", '<input type="date" data-qt="valid" value="' + esc(r.valid) + '">') +
+        fld("العميل", '<span class="sq"><select data-qt="party" data-qtr="1"><option value="">— اختر —</option>' + S.customers.map((x) => '<option value="' + esc(x.code) + '"' + (r.party === x.code ? " selected" : "") + ">" + esc(x.name) + "</option>").join("") + "</select></span>") +
+        fld("نسبة الضريبة %", '<input type="number" step="0.01" data-qt="vat" data-qtr="1" value="' + esc(r.vat) + '">') +
+        fld("الخصم", '<input type="number" step="0.01" data-qt="disc" data-qtr="1" value="' + esc(r.disc) + '">') +
+        '</div><div class="tw" style="margin-top:8px"><table><thead><tr><th>الصنف / البند</th><th>الكمية</th><th>السعر</th><th class="num">الإجمالي</th><th></th></tr></thead><tbody>' +
+        r.lines
+          .map(
+            (l, i) =>
+              "<tr><td><select data-ql=\"item\" data-i=\"" + i + '"><option value="">— بند حر —</option>' + S.items.map((x) => '<option value="' + esc(x.code) + '"' + (l.item === x.code ? " selected" : "") + ">" + esc(x.name) + "</option>").join("") + '</select><input data-ql="desc" data-i="' + i + '" placeholder="بيان" value="' + esc(l.desc) + '" style="margin-top:4px"></td><td><input type="number" step="any" data-ql="qty" data-i="' + i + '" value="' + esc(l.qty) + '" style="width:80px"></td><td><input type="number" step="0.01" data-ql="price" data-i="' + i + '" value="' + esc(l.price) + '" style="width:100px"></td><td class="num">' + fmt(num(l.qty) * num(l.price)) + '</td><td><button class="btn sm" data-act="qt_rm" data-i="' + i + '">حذف</button></td></tr>',
+          )
+          .join("") +
+        '</tbody></table></div><div class="bar"><button class="btn sm" data-act="qt_add">+ بند</button><span class="sp"></span><b>الإجمالي: ' + fmt(c.total) + (c.vat ? " (شامل ضريبة " + fmt(c.vat) + ")" : "") + '</b></div><div class="form">' +
+        fld("ملاحظات وشروط", '<input data-qt="notes" value="' + esc(r.notes) + '">', 1) +
+        '</div><p class="note neg" id="qt_err"></p></div><footer><button class="btn pri" data-act="qt_save">حفظ</button><button class="btn" data-act="close">إلغاء</button></footer>',
+    );
+  }
+  document.addEventListener("input", (e) => {
+    const t = e.target;
+    if (!QT || !t.dataset) return;
+    if (t.dataset.qt && !t.dataset.qtr) QT[t.dataset.qt] = t.value;
+    else if (t.dataset.ql && "item" !== t.dataset.ql) {
+      QT.lines[+t.dataset.i][t.dataset.ql] = t.value;
+    }
+  });
+  document.addEventListener("change", (e) => {
+    const t = e.target;
+    if (!QT || !t.dataset) return;
+    if (t.dataset.qt) {
+      QT[t.dataset.qt] = t.value;
+      t.dataset.qtr && draw();
+    } else if (t.dataset.ql) {
+      const l = QT.lines[+t.dataset.i];
+      l[t.dataset.ql] = t.value;
+      if ("item" === t.dataset.ql) {
+        const it = IX.it.get(t.value);
+        it && ((l.price = String(it.price || "")), (l.tx = it.tx || "S"));
+      }
+      draw();
+    }
+  });
+  A.qt_add = () => QT && (QT.lines.push(blankL()), draw());
+  A.qt_rm = (el) => QT && (QT.lines.splice(+el.dataset.i, 1), QT.lines.length || QT.lines.push(blankL()), draw());
+  A.qt_new = (el) => {
+    const ty = el.dataset.ty || "quote";
+    QT = { isNew: !0, id: uid(), ty, no: next(ty), date: today(), valid: "", party: "", lines: [blankL()], disc: "", vat: S.meta.vat || "0", notes: "", status: "quote" === ty ? "مسودة" : "مفتوح", qfrom: "" };
+    draw();
+  };
+  A.qt_edit = (el) => {
+    const r = byId(el.dataset.id);
+    r && ((QT = JSON.parse(JSON.stringify(r))), (QT.isNew = !1), draw());
+  };
+  A.qt_save = () => {
+    const r = QT,
+      err = (m) => ($("#qt_err").textContent = m),
+      no = parseInt(r.no);
+    if (!(no > 0)) return err("رقم المستند غير صحيح.");
+    if (list().some((x) => x.ty === r.ty && x.no === no && x.id !== r.id)) return err("الرقم " + TY[r.ty].p + "-" + no + " مستخدم من قبل.");
+    if (!okDate(r.date)) return err("التاريخ غير صحيح.");
+    if (r.valid && (!okDate(r.valid) || r.valid < r.date)) return err("تاريخ الصلاحية/التسليم غير صحيح.");
+    if (!r.party || !IX.cu.get(r.party)) return err("اختر العميل.");
+    const lines = r.lines.filter((l) => num(l.qty) > 0 || num(l.price) > 0 || l.item || String(l.desc || "").trim());
+    if (!lines.length) return err("أضف بنداً واحداً على الأقل.");
+    for (const l of lines) {
+      if (!(num(l.qty) > 0)) return err("الكمية لازم تكون أكبر من صفر.");
+      if (num(l.price) < 0) return err("السعر لا يكون سالباً.");
+      if (!l.item && !String(l.desc || "").trim()) return err("اكتب بياناً للبند الحر أو اختر صنفاً.");
+    }
+    if (num(r.vat) < 0 || num(r.vat) > 100) return err("نسبة الضريبة غير صحيحة.");
+    if (num(r.disc) < 0) return err("الخصم لا يكون سالباً.");
+    const clean = { id: r.id, ty: r.ty, no, date: r.date, valid: r.valid || "", party: r.party, lines: lines.map((l) => ({ item: l.item || "", desc: String(l.desc || "").trim(), qty: num(l.qty), price: num(l.price), tx: l.tx || "S" })), disc: r2(num(r.disc)), vat: num(r.vat), notes: String(r.notes || "").trim(), status: r.status, qfrom: r.qfrom || "" },
+      tot = calc(clean).total;
+    if (!(tot > 0)) return err("إجمالي المستند يجب أن يكون أكبر من صفر.");
+    if (tot >= 1e12) return err("إجمالي المستند كبير بشكل غير منطقي.");
+    const old = byId(r.id);
+    old ? (list()[list().indexOf(old)] = clean) : list().push(clean);
+    aud(old ? "تعديل" : "إضافة", TY[r.ty].n + " " + label(clean), clean.date + " · " + fmt(tot));
+    persist("quotes");
+    closeModal();
+    render();
+    toast("تم حفظ " + label(clean));
+  };
+  /* ---- تفاصيل وعمليات ---- */
+  function det(id) {
+    const r = byId(id);
+    if (!r) return;
+    const st = stateOf(r),
+      c = calc(r),
+      b = (a, t, cls) => '<button class="btn' + (cls ? " " + cls : "") + '" data-act="' + a + '" data-id="' + esc(r.id) + '">' + t + "</button>",
+      inv = invsOf(r);
+    let btns = "";
+    if ("quote" === r.ty) {
+      !inv.length && "محوّل" !== r.status && (btns += b("qt_toinv", "تحويل لفاتورة", "pri") + b("qt_toord", "تحويل لأمر بيع"));
+      ["مسودة", "مرسل"].includes(r.status) && (btns += b("qt_st", "تم الإرسال", "").replace('data-id', 'data-s="مرسل" data-id') + b("qt_st", "مقبول").replace('data-id', 'data-s="مقبول" data-id') + b("qt_st", "مرفوض").replace('data-id', 'data-s="مرفوض" data-id'));
+    } else {
+      "ملغي" !== r.status && "مسلَّم بالكامل" !== st[0] && (btns += b("qt_toinv", "فاتورة بالمتبقي", "pri"));
+      "ملغي" !== r.status && !inv.length && (btns += b("qt_st", "إلغاء الأمر", "danger").replace('data-id', 'data-s="ملغي" data-id'));
+      "ملغي" === r.status && (btns += b("qt_st", "إعادة فتح").replace('data-id', 'data-s="مفتوح" data-id'));
+    }
+    const mm = deliveredMap(r);
+    btns += b("qt_print", "طباعة") + b("qt_dn", "إذن تسليم");
+    !inv.length && (btns += b("qt_edit", "تعديل") + b("qt_del", "حذف", "danger"));
+    modal(
+      "<header><h2>" + TY[r.ty].n + " " + label(r) + '</h2><button class="btn sm" data-act="close">إغلاق</button></header><div class="body"><p><span class="chip ' + st[1] + '">' + st[0] + "</span> العميل: <b>" + esc(cname(r)) + "</b> · " + r.date + (r.valid ? " · " + ("quote" === r.ty ? "صالح حتى " : "التسليم ") + r.valid : "") +
+        '</p><table><thead><tr><th>البند</th><th class="num">المطلوب</th><th class="num">المسلَّم</th><th class="num">السعر</th></tr></thead><tbody>' +
+        remLines(r).map((l) => "<tr><td>" + esc(l.desc || (l.item ? nm("it", l.item) : "")) + '</td><td class="num">' + fq(l.qty) + '</td><td class="num">' + fq(l.done) + '</td><td class="num">' + fmt(l.price) + "</td></tr>").join("") +
+        '</tbody></table><p><b>الإجمالي: ' + fmt(c.total) + "</b></p>" +
+        (inv.length ? "<p>الفواتير: " + inv.map((d) => esc(docLabel(d))).join("، ") + "</p>" : "") +
+        (r.notes ? "<p>" + esc(r.notes) + "</p>" : "") + '<p class="note neg" id="qt_err"></p></div><footer>' + btns + '<span style="flex:1"></span><button class="btn" data-act="close">إغلاق</button></footer>',
+    );
+  }
+  A.qt_open = (el) => det(el.dataset.id);
+  A.qt_st = (el) => {
+    const r = byId(el.dataset.id);
+    if (!r) return;
+    r.status = el.dataset.s;
+    aud("تعديل", TY[r.ty].n + " " + label(r), "الحالة: " + r.status);
+    persist("quotes");
+    det(r.id);
+    render();
+  };
+  A.qt_del = (el) => {
+    const r = byId(el.dataset.id);
+    if (!r || invsOf(r).length) return toast("لا يمكن الحذف: عليه فواتير.");
+    ask("حذف " + TY[r.ty].n + " " + label(r) + "؟", "حذف", () => {
+      S.quotes = list().filter((x) => x !== r);
+      aud("حذف", TY[r.ty].n + " " + label(r), "");
+      persist("quotes");
+      closeModal();
+      render();
+    });
+  };
+  A.qt_toinv = (el) => {
+    const r = byId(el.dataset.id);
+    if (!r) return;
+    const L = remLines(r).filter((l) => l.rem > 0.0005);
+    if (!L.length) return toast("كل البنود مسلَّمة.");
+    if (!IX.cu.get(r.party)) return toast("العميل غير موجود.");
+    closeModal();
+    openDoc(null, "بيع");
+    DD.party = r.party;
+    DD.vat = String(r.vat);
+    DD.disc = L.length === r.lines.length && !invsOf(r).length ? String(r.disc || "") : "";
+    DD.notes = "حسب " + TY[r.ty].n + " " + label(r) + (r.notes ? " — " + r.notes : "");
+    DD.qref = r.id;
+    DD.lines = L.map((l) => ({ item: l.item, desc: l.desc, qty: String(l.rem), price: String(l.price), acc: "", tx: l.tx || "S", uf: 1 }));
+    drawDoc();
+  };
+  A.qt_toord = (el) => {
+    const q = byId(el.dataset.id);
+    if (!q) return;
+    const o = JSON.parse(JSON.stringify(q));
+    o.id = uid();
+    o.ty = "order";
+    o.no = next("order");
+    o.date = today();
+    o.status = "مفتوح";
+    o.qfrom = q.id;
+    list().push(o);
+    q.status = "محوّل";
+    aud("إضافة", "أمر بيع " + label(o), "من " + label(q));
+    persist("quotes");
+    render();
+    det(o.id);
+    toast("تم إنشاء أمر البيع " + label(o));
+  };
+  const paper = (r, title, withPrices) => {
+    const c = calc(r),
+      cu = IX.cu.get(r.party) || {};
+    return (
+      paperHead(title, "رقم: <b>" + label(r) + "</b> · التاريخ: " + r.date + (r.valid ? " · " + ("quote" === r.ty ? "صالح حتى " : "التسليم ") + r.valid : "")) +
+      '<div style="margin-bottom:10px"><b>العميل:</b> ' + esc(cu.name || "") + (cu.phone ? "<br>هاتف: " + esc(cu.phone) : "") + "</div><table><thead><tr><th>#</th><th>البيان</th><th>الكمية</th>" + (withPrices ? "<th>السعر</th><th>الإجمالي</th>" : "<th>المسلَّم سابقاً</th>") + "</tr></thead><tbody>" +
+      remLines(r).map((l, i) => "<tr><td>" + (i + 1) + "</td><td>" + esc(l.desc || (l.item ? nm("it", l.item) : "")) + '</td><td class="n">' + fq(withPrices ? l.qty : l.rem) + "</td>" + (withPrices ? '<td class="n">' + fmt(l.price) + '</td><td class="n">' + fmt(l.qty * l.price) + "</td>" : '<td class="n">' + fq(l.done) + "</td>") + "</tr>").join("") +
+      "</tbody></table>" +
+      (withPrices ? '<table style="width:46%;margin-top:10px;margin-right:auto"><tbody><tr><td>الإجمالي</td><td class="n">' + fmt(c.sub) + "</td></tr>" + (c.disc ? '<tr><td>الخصم</td><td class="n">' + fmt(c.disc) + "</td></tr>" : "") + (c.vat ? "<tr><td>الضريبة " + r.vat + '%</td><td class="n">' + fmt(c.vat) + "</td></tr>" : "") + '<tr><th>الصافي</th><th class="n">' + fmt(c.total) + "</th></tr></tbody></table><p>" + tafqeet(c.total) + "</p>" : "") +
+      (r.notes ? "<p><b>ملاحظات:</b> " + esc(r.notes) + "</p>" : "") +
+      (withPrices ? "" : '<div style="display:flex;justify-content:space-between;margin-top:34px"><span>المستلم: ................</span><span>التوقيع: ................</span></div>') +
+      pfoot()
+    );
+  };
+  A.qt_print = (el) => {
+    const r = byId(el.dataset.id);
+    r && (closeModal(), preview(paper(r, TY[r.ty].n, !0), "", (IX.cu.get(r.party) || {}).phone));
+  };
+  A.qt_dn = (el) => {
+    const r = byId(el.dataset.id);
+    r && (closeModal(), preview(paper(r, "إذن تسليم", !1), "", (IX.cu.get(r.party) || {}).phone));
+  };
+  /* ---- الشاشة ---- */
+  VIEWS.quotes = () => {
+    const f = V.qt,
+      q = f.q.trim(),
+      all = list().map((r) => Object.assign({}, r, { st: stateOf(r), tot: calc(r).total, cn: cname(r) })),
+      rows = all
+        .filter((r) => (!f.ty || r.ty === f.ty) && (!f.st || r.st[0] === f.st) && (!f.from || r.date >= f.from) && (!f.to || r.date <= f.to) && (!q || (label(r) + " " + r.cn).includes(q)))
+        .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.no - a.no)),
+      openQ = all.filter((r) => "quote" === r.ty && ["مسودة", "مرسل", "مقبول"].includes(r.status) && !invsOf(r).length && r.st[0] !== "منتهي"),
+      openO = all.filter((r) => "order" === r.ty && ["مفتوح", "مسلَّم جزئياً"].includes(r.st[0]));
+    return (
+      '<div class="grid kpis"><div class="kpi"><small>عروض سارية</small><b>' + openQ.length + "</b><i>" + fmt(openQ.reduce((s, r) => s + r.tot, 0)) + '</i></div><div class="kpi"><small>أوامر بيع مفتوحة</small><b>' + openO.length + "</b><i>" + fmt(openO.reduce((s, r) => s + r.tot, 0)) + '</i></div></div><div class="bar"><label>النوع<select data-set="qt.ty"><option value="">الكل</option><option value="quote"' + ("quote" === f.ty ? " selected" : "") + '>عروض أسعار</option><option value="order"' + ("order" === f.ty ? " selected" : "") + ">أوامر بيع</option></select></label>" + period("qt") +
+      '<label>بحث<input type="search" id="qtq" data-set="qt.q" data-live value="' + esc(f.q) + '" placeholder="رقم أو عميل"></label><span class="sp"></span>' + xbtn() +
+      '<button class="btn pri" data-act="qt_new" data-ty="quote">+ عرض سعر</button><button class="btn" data-act="qt_new" data-ty="order">+ أمر بيع</button></div>' +
+      table(
+        "عروض الأسعار وأوامر البيع",
+        [
+          { k: "date", t: "التاريخ" },
+          { k: "no", t: "الرقم", h: (r) => "<b>" + esc(label(r)) + "</b>" },
+          { k: "ty", t: "النوع", h: (r) => TY[r.ty].n },
+          { k: "cn", t: "العميل" },
+          { k: "tot", t: "الإجمالي", n: 1 },
+          { k: "valid", t: "الصلاحية / التسليم" },
+          { k: "st", t: "الحالة", h: (r) => '<span class="chip ' + r.st[1] + '">' + r.st[0] + "</span>" },
+        ],
+        rows,
+        { row: (r) => 'class="click" data-act="qt_open" data-id="' + esc(r.id) + '"' },
       )
     );
   };
