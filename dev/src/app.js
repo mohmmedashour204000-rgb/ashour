@@ -132,7 +132,7 @@ const Store = {
     failed: !1,
     async init() {
       try {
-        const t = window.claude && window.claude.use;
+        const t = null;
         if (t) {
           const e = await Promise.race([t("db"), new Promise((t) => setTimeout(() => t(null), 1e4))]);
           if (e) return ((this.db = e), void (this.kind = "cloud"));
@@ -3615,7 +3615,7 @@ function delMove() {
 }
 async function saveFile(t, e, a) {
   try {
-    const a = window.claude && window.claude.use ? await window.claude.use("downloads") : null;
+    const a = null;
     if (a) return void (await a.save({ filename: t, data: e }));
   } catch (t) {
     if (t && "declined" === t.code) return;
