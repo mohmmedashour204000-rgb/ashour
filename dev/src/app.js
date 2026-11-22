@@ -3113,6 +3113,16 @@ function entryTot() {
     (a ? (t ? "متزن ✓" : "بدون مبالغ") : "الفرق " + fmt(t - e)) +
     "</span>";
 }
+const zbFcurs = () =>
+  String(S.meta.fcur || "")
+    .split(/[,،\s]+/)
+    .filter(Boolean)
+    .slice(0, 8);
+const zbFRem = (iv, exceptId) =>
+  r2(
+    (iv.ftotal || 0) -
+      S.docs.filter((v) => "vch" === v.kind && v.inv === iv.id && v.id !== exceptId && v.fx).reduce((a, v) => a + (v.fx.fa || 0), 0),
+  );
 function zbFutureErr(d) {
   return d && d > today() ? "لا يمكن استخدام تاريخ مستقبلي (" + d + ") — تاريخ اليوم " + today() + "." : "";
 }
@@ -4530,10 +4540,22 @@ function postV(t) {
     o = { cc: t.cc || "", cu: "cu" === a[0] ? a[1] : "", su: "su" === a[0] ? a[1] : "", cs: "cs" === a[0] ? a[1] : "" },
     l = Object.assign({}, c, { cc: "", cu: "", su: "", cs: "" }, { a: e, cc: t.cc || "" }),
     r = Object.assign({}, c, o, { a: s });
+  const ca = t.fx ? r2(t.fx.cash) : t.amt,
+    gain = "قبض" === t.t ? r2(ca - t.amt) : r2(t.amt - ca);
+  let fxl = null;
+  if (gain) {
+    const fa = gain > 0 ? "400404" : "521106";
+    if (!IX.acc.get(fa)) {
+      S.journal = S.journal.filter((x) => x.dc !== t.id);
+      return "حساب فروق العملة (" + fa + ") غير موجود في دليل الحسابات.";
+    }
+    fxl = Object.assign({}, c, { a: fa, cc: "", cu: "", su: "", cs: "", d: gain < 0 ? -gain : 0, c: gain > 0 ? gain : 0, desc: c.desc + " (فرق عملة)" });
+  }
   return (
     "قبض" === t.t
-      ? S.journal.push(Object.assign(l, { d: t.amt, c: 0 }), Object.assign(r, { d: 0, c: t.amt }))
-      : S.journal.push(Object.assign(r, { d: t.amt, c: 0 }), Object.assign(l, { d: 0, c: t.amt })),
+      ? S.journal.push(Object.assign(l, { d: ca, c: 0 }), Object.assign(r, { d: 0, c: t.amt }))
+      : S.journal.push(Object.assign(r, { d: t.amt, c: 0 }), Object.assign(l, { d: 0, c: ca })),
+    fxl && S.journal.push(fxl),
     ""
   );
 }
@@ -4639,7 +4661,11 @@ function openDoc(t, e) {
     const e = IX.doc.get(t);
     if (!e) return;
     if ("vch" === e.kind) return openVch(t);
-    ((DD = JSON.parse(JSON.stringify(e))), (DD.isNew = !1), (DD.payNow = ""), (DD.payAcc = mapAcc("cash")));
+    ((DD = JSON.parse(JSON.stringify(e))), (DD.isNew = !1), (DD.payNow = ""), (DD.payAcc = mapAcc("cash")),
+      DD.cur &&
+        (DD.lines.forEach((l) => "" !== l.fp && void 0 !== l.fp && (l.price = l.fp)),
+        (DD.disc = DD.fdisc || DD.disc),
+        (DD.rate = String(DD.rate))));
   } else
     DD = {
       id: uid(),
@@ -4748,6 +4774,8 @@ function drawDoc() {
       o("no", "الرقم", 'type="number" min="1"') +
       o("date", "التاريخ", 'type="date"') +
       (e.ret ? "" : o("due", "تاريخ الاستحقاق", 'type="date"')) +
+      (!e.ret && (zbFcurs().length || t.cur)
+        ? '<label>العملة<select id="d_cur" data-dh="cur" data-fxchg="1"><option value="">' + esc(S.meta.cur || "المحلية") + "</option>" + zbFcurs().map((c) => '<option value="' + esc(c) + '"' + (c === t.cur ? " selected" : "") + ">" + esc(c) + "</option>").join("") + "</select></label>" + (t.cur ? '<label>سعر الصرف (1 ' + esc(t.cur) + " = ؟ " + esc(S.meta.cur || "محلي") + ')<input id="d_rate" type="number" step="0.0001" inputmode="decimal" data-dh="rate" value="' + esc(t.rate || "") + '"></label>' : "") : "") +
       "<label>" +
       (s ? "العميل" : "المورد") +
       '<span class="sq"><select id="d_party" data-dh="party">' +
@@ -4995,7 +5023,8 @@ function docTot() {
     fmt(e.vat) +
     "</b> · الصافي المستحق: <b>" +
     fmt(e.total) +
-    "</b>"),
+    "</b>" +
+    (t.cur && num(t.rate) > 0 ? " " + esc(t.cur) + " ≈ <b>" + fmt(e.total * num(t.rate)) + "</b> " + esc(S.meta.cur || "") : "")),
     t.lines.forEach((t, e) => {
       const a = $("#dl_t" + e);
       a && (a.textContent = fmt(num(t.qty) * num(t.price)));
@@ -5038,6 +5067,26 @@ function commitDoc(t) {
     return n("مسموح لك بالتعامل مع مخزنك فقط: «" + nm("wh", authWhCode()) + "».");
   if (!t.date) return n("التاريخ مطلوب.");
   if (zbFutureErr(t.date)) return n("لا يمكن إصدار فاتورة بتاريخ مستقبلي (" + t.date + ").");
+  let zbFt = 0;
+  {
+    const d0 = IX.doc.get(t.id);
+    if (d0 && paidOf(d0) > 0 && (d0.cur || "") !== (t.cur || "" ) ) return n("لا يمكن تغيير عملة فاتورة عليها سداد.");
+    if (d0 && paidOf(d0) > 0 && t.cur && num(d0.rate) !== num(t.rate)) return n("لا يمكن تغيير سعر الصرف لفاتورة عليها سداد.");
+    if (t.cur) {
+      const rt = num(t.rate);
+      if (s) return n("المرتجعات تُسجَّل بالعملة المحلية.");
+      if (!zbFcurs().includes(t.cur)) return n("العملة غير معرّفة — أضفها من الإعدادات ← العملات الأجنبية.");
+      if (!(rt > 0) || rt > 1e6) return n("أدخل سعر صرف صحيحاً للعملة " + t.cur + ".");
+      if (num(t.payNow) > 0) return n("الفاتورة بعملة أجنبية: سجّل السداد بسند قبض/صرف مرتبط بها.");
+      zbFt = invCalc(t).total;
+      t = Object.assign({}, t, {
+        lines: t.lines.map((l) => Object.assign({}, l, { fp: String(l.price), price: String(Math.round(num(l.price) * rt * 1e4) / 1e4) })),
+        fdisc: String(t.disc || ""),
+        disc: String(r2(num(t.disc) * rt)),
+      });
+      S.meta.fxr = Object.assign({}, S.meta.fxr || {}, { [t.cur]: rt });
+    }
+  }
   if (!t.party) return n("اختر " + (a ? "العميل" : "المورد") + ".");
   const c = parseInt(t.no);
   if (!(c > 0)) return n("رقم المستند غير صحيح.");
@@ -5123,6 +5172,7 @@ function commitDoc(t) {
         tx: t.tx && "S" !== t.tx ? t.tx : "S",
         lot: String(t.lot || "").trim(),
         exp: t.exp || "",
+        fp: t.fp || "",
       }))
       .map((t, e) => {
         const a = o.ls[e];
@@ -5130,6 +5180,10 @@ function commitDoc(t) {
       }),
     ref: t.ref || "",
     qref: t.qref || "",
+    cur: t.cur || "",
+    rate: t.cur ? num(t.rate) : 0,
+    ftotal: t.cur ? r2(zbFt) : 0,
+    fdisc: t.cur ? t.fdisc : "",
     disc: o.disc,
     vat: num(t.vat),
     sub: o.sub,
@@ -5209,7 +5263,7 @@ function openVch(t, e, a) {
   if (t) {
     const e = IX.doc.get(t);
     if (!e) return;
-    VD = Object.assign({ isNew: !1 }, e, { amt: String(e.amt) });
+    VD = Object.assign({ isNew: !1 }, e, { amt: String(e.amt) }, e.fx ? { fa: String(e.fx.fa), frate: String(e.fx.rate) } : {});
   } else if (
     ((VD = Object.assign(
       {
@@ -5238,11 +5292,20 @@ function openVch(t, e, a) {
   drawVch();
 }
 function drawVch() {
+  {
+    const fi = VD.inv && IX.doc.get(VD.inv);
+    if (fi && fi.cur && !VD.fa) {
+      VD.fa = String(Math.max(zbFRem(fi, VD.id), 0));
+      VD.frate = String((S.meta.fxr && S.meta.fxr[fi.cur]) || fi.rate);
+      VD.amt = String(r2(num(VD.fa) * num(VD.frate)));
+    }
+  }
   const t = VD,
     e = DOCT[t.t],
     a = t.party ? t.party.split(":") : [],
     s = $("#modal .body"),
     n = s ? s.scrollTop : 0,
+    zbFxi = t.inv && IX.doc.get(t.inv) && IX.doc.get(t.inv).cur ? IX.doc.get(t.inv) : null,
     c = !(!t.ctr || !isCustAcc(t.ctr) || "cs" === a[0]),
     o =
       "cu" === a[0] || "su" === a[0]
@@ -5258,9 +5321,15 @@ function drawVch() {
       esc(t.no) +
       '"></label><label>التاريخ<input type="date" id="v_date" data-vh="date" value="' +
       esc(t.date) +
-      '"></label><label>المبلغ<input id="v_amt" type="number" step="0.01" inputmode="decimal" data-vh="amt" value="' +
-      esc(t.amt) +
       '"></label><label>' +
+      (zbFxi ? "المبلغ بالعملة المحلية (محسوب)" : "المبلغ") +
+      '<input id="v_amt" ' + (zbFxi ? "readonly " : "") + 'type="number" step="0.01" inputmode="decimal" data-vh="amt" value="' +
+      esc(t.amt) +
+      '"></label>' +
+      (zbFxi
+        ? '<label>المبلغ بـ' + esc(zbFxi.cur) + ' (متبقي ' + fmt(Math.max(zbFRem(zbFxi, t.id), 0)) + ')<input id="v_fa" type="number" step="0.01" inputmode="decimal" data-vh="fa" value="' + esc(t.fa || "") + '"></label><label>سعر الصرف اليوم (سعر الفاتورة ' + esc(zbFxi.rate) + ')<input id="v_frate" type="number" step="0.0001" inputmode="decimal" data-vh="frate" value="' + esc(t.frate || "") + '"></label>'
+        : "") +
+      "<label>" +
       ("قبض" === t.t ? "استلمنا في (خزينة / بنك)" : "صرفنا من (خزينة / بنك)") +
       '<select id="v_acc" data-vh="acc">' +
       accOptsAll(t.acc, "— اختر —") +
@@ -5353,8 +5422,25 @@ function saveV() {
     const old = IX.doc.get(t.id),
       prev = old && old.inv === t.inv ? num(old.amt) : 0,
       room = r2(remOf(iv) + prev);
-    if (r2(num(t.amt)) > room + 0.005)
+    if (!iv.cur && r2(num(t.amt)) > room + 0.005)
       return e("المبلغ أكبر من المتبقي على الفاتورة (" + fmt(Math.max(room, 0)) + ").");
+  }
+  let zbFx = null,
+    zbAr = null;
+  {
+    const fi = t.inv && IX.doc.get(t.inv);
+    if (fi && fi.cur) {
+      const fa = r2(num(t.fa)),
+        fr = num(t.frate),
+        left = zbFRem(fi, t.id),
+        old0 = IX.doc.get(t.id),
+        room0 = r2(remOf(fi) + (old0 && old0.inv === t.inv ? num(old0.amt) : 0));
+      if (!(fa > 0)) return e("أدخل المبلغ بالعملة " + fi.cur + ".");
+      if (!(fr > 0) || fr > 1e6) return e("أدخل سعر الصرف الحالي.");
+      if (fa > left + 0.005) return e("المبلغ أكبر من المتبقي بالعملة الأجنبية (" + fmt(Math.max(left, 0)) + " " + fi.cur + ").");
+      zbAr = Math.abs(fa - left) < 0.005 ? room0 : Math.min(r2(fa * fi.rate), room0);
+      zbFx = { cur: fi.cur, fa, rate: fr, cash: r2(fa * fr) };
+    }
   }
   const s = t.party ? t.party.split(":") : [];
   if (!t.party && !t.ctr) return e("اختر الطرف أو الحساب المقابل.");
@@ -5370,13 +5456,13 @@ function saveV() {
       party: t.party,
       acc: t.acc,
       ctr: "cu" === s[0] || "su" === s[0] ? "" : t.ctr,
-      amt: r2(num(t.amt)),
+      amt: zbFx ? zbAr : r2(num(t.amt)),
       desc: String(t.desc || "").trim(),
       cc: t.cc || "",
       inv: t.inv || "",
       je: t.je || "",
     },
-    c = postV(n);
+    c = (zbFx && (n.fx = zbFx), postV(n));
   if (c) return e(c);
   const o = IX.doc.get(n.id);
   (o ? (S.docs[S.docs.indexOf(o)] = n) : S.docs.push(n),
@@ -5814,6 +5900,7 @@ function invHtml(t) {
     l = r2(t.total - o);
   return (
     paperHead(e.n, "رقم: <b>" + docLabel(t) + "</b> · التاريخ: " + t.date + (t.due ? " · الاستحقاق: " + t.due : "")) +
+    (t.cur ? '<p style="margin:0 0 8px;font-size:13px">فاتورة بعملة <b>' + esc(t.cur) + "</b> — سعر الصرف <b>" + esc(t.rate) + "</b> — الإجمالي بالعملة الأجنبية: <b>" + fmt(t.ftotal) + " " + esc(t.cur) + "</b> (الأسعار أدناه مُحوَّلة للعملة المحلية)</p>" : "") +
     '<div style="display:flex;justify-content:space-between;margin-bottom:10px"><div><b>' +
     (e.sale ? "العميل" : "المورد") +
     ":</b> " +
@@ -7584,6 +7671,7 @@ function taxInvHtml(t) {
         (t.time ? " " + t.time : "") +
         (t.due ? " · الاستحقاق: " + t.due : ""),
     ) +
+    (t.cur ? '<p style="margin:0 0 8px;font-size:13px">فاتورة بعملة <b>' + esc(t.cur) + "</b> — سعر الصرف <b>" + esc(t.rate) + "</b> — الإجمالي بالعملة الأجنبية: <b>" + fmt(t.ftotal) + " " + esc(t.cur) + "</b> (القيم أدناه بالعملة المحلية)</p>" : "") +
     '<p style="font-size:11.5px;color:#444;margin:-6px 0 10px">' +
     sellerLine() +
     '</p><div style="display:flex;justify-content:space-between;margin-bottom:10px;gap:12px"><div><b>العميل / Buyer:</b> ' +
@@ -20224,6 +20312,38 @@ async function syBoot() {
     const it = IX.it.get(el.dataset.i);
     Object.assign(MV, { type: "منصرف", item: el.dataset.i, wh: el.dataset.w, qty: el.dataset.q, lot: el.dataset.l, desc: "إعدام دفعة منتهية الصلاحية " + (el.dataset.l || ""), cost: String(r2(avgOf(stock().get(el.dataset.i), it))) });
     drawMove();
+  };
+})();
+
+/* ====== العملات الأجنبية ====== */
+(function () {
+  document.addEventListener("change", (e) => {
+    const t = e.target;
+    if (DD && t.dataset && t.dataset.fxchg) {
+      DD.cur = t.value;
+      DD.rate = t.value ? String((S.meta.fxr && S.meta.fxr[t.value]) || "") : "";
+      drawDoc();
+    }
+  });
+  document.addEventListener("input", (e) => {
+    const t = e.target;
+    if (VD && t.dataset && ("fa" === t.dataset.vh || "frate" === t.dataset.vh)) {
+      VD[t.dataset.vh] = t.value;
+      VD.amt = String(r2(num(VD.fa) * num(VD.frate)));
+      const a = document.getElementById("v_amt");
+      a && (a.value = VD.amt);
+    }
+  });
+  const _setup = VIEWS.setup;
+  VIEWS.setup = function () {
+    return (
+      _setup.apply(this, arguments) +
+      '<div class="card" id="fx_card"><h3>العملات الأجنبية</h3><p class="note">اكتب رموز العملات الأجنبية التي تتعامل بها (مثال: USD, EUR). بعدها تظهر خانة «العملة» في الفاتورة؛ تكتب الأسعار بالعملة الأجنبية وسعر الصرف، وتُسجَّل القيود بالعملة المحلية (' +
+        esc(S.meta.cur || "") +
+        '). عند السداد بسعر صرف مختلف يُسجَّل فرق العملة (ربح/خسارة) تلقائياً.</p><div class="form"><label>العملات الأجنبية<input data-meta="fcur" dir="ltr" value="' +
+        esc(S.meta.fcur || "") +
+        '" placeholder="USD, EUR, SAR"></label></div></div>'
+    );
   };
 })();
 
