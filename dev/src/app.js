@@ -71,6 +71,7 @@ const LISTS = [
     "ships",
     "boms",
     "leaves",
+    "cheques",
   ],
   CHUNK = { audit: 300, journal: 150, inst: 400, moves: 300, items: 400, docs: 150 };
 let S = {
@@ -875,7 +876,10 @@ const ICON = {
       t: "السندات",
       i: "cash",
       c: "#c2780e",
-      v: [["vouchers", "قبض وصرف"]],
+      v: [
+        ["vouchers", "قبض وصرف"],
+        ["cheques", "الشيكات وأوراق القبض والدفع"],
+      ],
       s: () => S.docs.filter((t) => "vch" === t.kind).length + " سند",
     },
     {
@@ -5292,6 +5296,10 @@ function saveV() {
   if (S.docs.some((e) => e.t === t.t && e.no === a && e.id !== t.id))
     return e("الرقم " + DOCT[t.t].p + "-" + a + " مستخدم من قبل.");
   if (!t.date) return e("التاريخ مطلوب.");
+  {
+    const o0 = IX.doc.get(t.id);
+    if (o0 && o0.chq) return e("هذا السند ناتج عن شيك — عدّله من شاشة الشيكات.");
+  }
   if (t.inv) {
     const iv = IX.doc.get(t.inv);
     if (!iv || "inv" !== iv.kind) return e("الفاتورة المرتبطة غير موجودة.");
@@ -5338,6 +5346,7 @@ function saveV() {
 }
 function delV() {
   const t = IX.doc.get(VD.id);
+  if (t && t.chq) return toast("هذا السند ناتج عن شيك — احذفه أو ألغه من شاشة الشيكات.");
   if (t) {
     {
       const e = lockChk([t.date]);
@@ -18114,6 +18123,7 @@ const SY_LISTS = [
     "ships",
     "boms",
     "leaves",
+    "cheques",
   ],
   SY_LOCALM = new Set([
     "bkDate",
@@ -18152,6 +18162,7 @@ const SY_LISTS = [
     ships: "شحنة استيراد",
     boms: "قائمة مواد",
     leaves: "طلب إجازة",
+    cheques: "شيك",
     meta: "الإعدادات",
   },
   syKey = {
@@ -18176,6 +18187,7 @@ const SY_LISTS = [
     ships: (t) => t.id,
     boms: (t) => t.id,
     leaves: (t) => t.id,
+    cheques: (t) => t.id,
   };
 function syHash(t) {
   const e = JSON.stringify(t);
@@ -19417,6 +19429,367 @@ async function syBoot() {
         }
       });
   });
+})();
+
+/* ====== الشيكات وأوراق القبض والدفع ====== */
+(function () {
+  const IN_ST = ["محفظة", "مودع", "محصّل", "مرتد", "ملغي"],
+    OUT_ST = ["صادر", "مصروف", "مرتد", "ملغي"],
+    ACTIVE = ["محفظة", "مودع", "صادر"],
+    DONE = ["محصّل", "مصروف"];
+  V.cq = { dir: "", st: "", q: "", from: "", to: "" };
+  const list = () => S.cheques || (S.cheques = []),
+    isIn = (c) => "in" === c.dir,
+    byId = (id) => list().find((c) => c.id === id),
+    pname = (p) => {
+      const a = p ? p.split(":") : [];
+      return a[0] ? nm(a[0], a[1]) : "";
+    },
+    addDays = (d, n) => {
+      const x = new Date(d + "T00:00:00");
+      x.setDate(x.getDate() + n);
+      return x.getFullYear() + "-" + String(x.getMonth() + 1).padStart(2, "0") + "-" + String(x.getDate()).padStart(2, "0");
+    },
+    logAdd = (c, t) => (c.log = (c.log || []).concat([{ d: today(), t }]).slice(-30)),
+    chqAcc = (c) => (isIn(c) ? (c.due > c.date ? "110403" : "110402") : c.due > c.date ? "210202" : "210201");
+  const stColor = (s) => ({ محفظة: "warn", مودع: "warn", صادر: "warn", محصّل: "good", مصروف: "good", مرتد: "bad", ملغي: "" })[s] || "";
+  /* ---- السند المولَّد للتسجيل ---- */
+  function writeVch(c) {
+    const t = isIn(c) ? "قبض" : "صرف",
+      old = c.vch && IX.doc.get(c.vch),
+      doc = {
+        id: c.vch || uid(),
+        kind: "vch",
+        t,
+        no: old ? old.no : nextNo(t),
+        date: c.date,
+        party: c.party,
+        acc: c.acc,
+        ctr: "",
+        amt: r2(c.amt),
+        desc: "شيك رقم " + c.no + (c.bank ? " - " + c.bank : ""),
+        cc: "",
+        inv: c.inv || "",
+        je: old ? old.je : "",
+        chq: c.id,
+      },
+      e = postV(doc);
+    if (e) return e;
+    const o = IX.doc.get(doc.id);
+    o ? (S.docs[S.docs.indexOf(o)] = doc) : S.docs.push(doc);
+    c.vch = doc.id;
+    return "";
+  }
+  function dropVch(c) {
+    if (!c.vch) return;
+    S.journal = S.journal.filter((e) => e.dc !== c.vch);
+    S.docs = S.docs.filter((d) => d.id !== c.vch);
+    c.vch = "";
+  }
+  const saveAll = () => (reindex(), persist("docs"), persist("journal"), persist("cheques"));
+  /* ---- التحقق ---- */
+  function validate(c, prevAmt) {
+    if (!c.no || !String(c.no).trim()) return "اكتب رقم الشيك.";
+    if (!okDate(c.date)) return "تاريخ التحرير غير صحيح.";
+    if (!okDate(c.due)) return "تاريخ الاستحقاق غير صحيح.";
+    if (c.due < c.date) return "تاريخ الاستحقاق قبل تاريخ التحرير.";
+    if (c.date > zbTomorrow()) return "تاريخ التحرير في المستقبل — راجع التاريخ.";
+    if (!(c.amt > 0)) return "أدخل مبلغاً أكبر من صفر.";
+    if (c.amt >= 1e12) return "المبلغ كبير بشكل غير منطقي.";
+    if (!c.party) return "اختر " + (isIn(c) ? "العميل الساحب" : "المورد المستفيد") + ".";
+    const p = c.party.split(":");
+    if (!IX[{ cu: "cu", su: "su" }[p[0]]] || !IX[{ cu: "cu", su: "su" }[p[0]]].get(p[1])) return "الطرف غير موجود.";
+    if (list().some((x) => x.id !== c.id && x.dir === c.dir && x.no === c.no && (x.bank || "") === (c.bank || "") && "ملغي" !== x.status))
+      return "شيك بنفس الرقم والبنك مسجّل من قبل.";
+    if (!IX.acc.get(chqAcc(c))) return "حساب الشيكات (" + chqAcc(c) + ") غير موجود في دليل الحسابات.";
+    if (c.inv) {
+      const iv = IX.doc.get(c.inv);
+      if (!iv || "inv" !== iv.kind) return "الفاتورة المرتبطة غير موجودة.";
+      const D = DOCT[iv.t],
+        want = D.sale ? (D.ret ? "صرف" : "قبض") : D.ret ? "قبض" : "صرف";
+      if ((isIn(c) ? "قبض" : "صرف") !== want) return "نوع الشيك لا يناسب هذه الفاتورة.";
+      if (c.party !== D.pk + ":" + iv.party) return "طرف الشيك يختلف عن طرف الفاتورة.";
+      if (r2(c.amt) > r2(remOf(iv) + (prevAmt || 0)) + 0.005) return "المبلغ أكبر من المتبقي على الفاتورة (" + fmt(Math.max(remOf(iv), 0)) + ").";
+    }
+    const l = lockChk([c.date]);
+    return l || "";
+  }
+  /* ---- نموذج التسجيل / التعديل ---- */
+  let CQ = null;
+  const field = (lbl, inner, span) => "<label" + (span ? ' style="grid-column:1/-1"' : "") + ">" + lbl + inner + "</label>";
+  function drawForm() {
+    const c = CQ,
+      pk = isIn(c) ? "cu" : "su",
+      invs = c.party
+        ? S.docs.filter((d) => "inv" === d.kind && DOCT[d.t].pk === c.party.split(":")[0] && d.party === c.party.split(":")[1] && !DOCT[d.t].ret && (remOf(d) > 0.005 || d.id === c.inv))
+        : [];
+    modal(
+      "<header><h2>" + (c.isNew ? (isIn(c) ? "تسجيل شيك وارد" : "تسجيل شيك صادر") : "تعديل شيك " + esc(c.no)) +
+        '</h2><button class="btn sm" data-act="close">إغلاق</button></header><div class="body"><div class="form">' +
+        field("رقم الشيك", '<input id="cq_no" data-cq="no" value="' + esc(c.no) + '">') +
+        field("البنك", '<input id="cq_bank" data-cq="bank" value="' + esc(c.bank) + '" placeholder="اسم البنك">') +
+        field("تاريخ التحرير", '<input type="date" data-cq="date" value="' + esc(c.date) + '">') +
+        field("تاريخ الاستحقاق", '<input type="date" data-cq="due" value="' + esc(c.due) + '">') +
+        field("المبلغ", '<input type="number" step="0.01" inputmode="decimal" data-cq="amt" value="' + esc(c.amt) + '">') +
+        field(
+          isIn(c) ? "العميل الساحب" : "المورد المستفيد",
+          '<span class="sq"><select data-cq="party" data-cqr="1"><option value="">— اختر —</option>' +
+            (pk === "cu" ? S.customers : S.suppliers)
+              .map((x) => '<option value="' + pk + ":" + esc(x.code) + '"' + (c.party === pk + ":" + x.code ? " selected" : "") + ">" + esc(x.name) + "</option>")
+              .join("") +
+            "</select></span>",
+        ) +
+        (invs.length
+          ? field(
+              isIn(c) ? "سداد فاتورة" : "سداد فاتورة مشتريات",
+              '<select data-cq="inv"><option value="">— دفعة عامة —</option>' +
+                invs.map((d) => '<option value="' + esc(d.id) + '"' + (d.id === c.inv ? " selected" : "") + ">" + esc(docLabel(d)) + " — متبقي " + fmt(remOf(d)) + "</option>").join("") +
+                "</select>",
+            )
+          : "") +
+        field("ملاحظات", '<input data-cq="notes" value="' + esc(c.notes) + '">', 1) +
+        '</div><p class="note">' +
+        (isIn(c)
+          ? "عند الحفظ يُسجَّل قيد: من حساب الشيكات (تحت التحصيل أو آجلة حسب الاستحقاق) إلى حساب العميل، ويُخصم من رصيده."
+          : "عند الحفظ يُسجَّل قيد: من حساب المورد إلى أوراق الدفع، ويُخصم من رصيده.") +
+        '</p><p class="note neg" id="cq_err"></p></div><footer><button class="btn pri" data-act="chq_save">حفظ</button><button class="btn" data-act="close">إلغاء</button></footer>',
+    );
+  }
+  document.addEventListener("input", (e) => {
+    const t = e.target;
+    CQ && t.dataset && t.dataset.cq && !t.dataset.cqr && (CQ[t.dataset.cq] = t.value);
+  });
+  document.addEventListener("change", (e) => {
+    const t = e.target;
+    if (CQ && t.dataset && t.dataset.cq) {
+      CQ[t.dataset.cq] = t.value;
+      "party" === t.dataset.cq && (CQ.inv = "");
+      t.dataset.cqr && drawForm();
+    }
+  });
+  A.chq_new = (el) => {
+    const d = el.dataset.d || "in";
+    CQ = { isNew: !0, id: uid(), dir: d, no: "", bank: "", date: today(), due: today(), amt: "", party: "", inv: "", notes: "", status: "in" === d ? "محفظة" : "صادر", vch: "", log: [] };
+    drawForm();
+  };
+  A.chq_edit = (el) => {
+    const c = byId(el.dataset.id);
+    c && ((CQ = Object.assign({ isNew: !1 }, c, { amt: String(c.amt) })), drawForm());
+  };
+  A.chq_save = () => {
+    const f = CQ,
+      err = (m) => ($("#cq_err").textContent = m),
+      old = byId(f.id),
+      c = { id: f.id, dir: f.dir, no: String(f.no || "").trim(), bank: String(f.bank || "").trim(), date: f.date, due: f.due, amt: r2(num(f.amt)), party: f.party, inv: f.inv || "", notes: String(f.notes || "").trim(), status: old ? old.status : f.status, vch: old ? old.vch : "", log: old ? old.log || [] : [], acc: "" };
+    if (old && !ACTIVE.includes(old.status)) return err("لا يمكن تعديل شيك تمت عليه عملية.");
+    const prevAmt = old && old.vch && old.inv === c.inv ? num(old.amt) : 0,
+      e = validate(c, prevAmt);
+    if (e) return err(e);
+    if (old) {
+      const l = lockChk([old.date]);
+      if (l) return err(l);
+    }
+    c.acc = chqAcc(c);
+    const bak = { j: S.journal.slice(), d: S.docs.slice() },
+      m = writeVch(c);
+    if (m) return ((S.journal = bak.j), (S.docs = bak.d), err(m));
+    logAdd(c, old ? "تعديل" : "تسجيل");
+    old ? (list()[list().indexOf(old)] = c) : list().push(c);
+    aud(old ? "تعديل" : "إضافة", "شيك " + c.no, c.date + " · " + fmt(c.amt));
+    saveAll();
+    closeModal();
+    render();
+    toast("تم حفظ الشيك وإنشاء القيد");
+  };
+  /* ---- تفاصيل وعمليات ---- */
+  function openDet(id) {
+    const c = byId(id);
+    if (!c) return;
+    const b = (a, t, cls) => '<button class="btn' + (cls ? " " + cls : "") + '" data-act="' + a + '" data-id="' + esc(c.id) + '">' + t + "</button>";
+    let btns = "";
+    if (isIn(c)) {
+      "محفظة" === c.status && (btns += b("chq_dep", "تم الإيداع في البنك"));
+      ACTIVE.includes(c.status) && (btns += b("chq_clr", "تحصيل", "pri") + b("chq_bnc", "ارتداد", "danger"));
+      "محصّل" === c.status && (btns += b("chq_undo", "تراجع عن التحصيل"));
+    } else {
+      "صادر" === c.status && (btns += b("chq_clr", "صرف من البنك", "pri") + b("chq_bnc", "ارتداد", "danger"));
+      "مصروف" === c.status && (btns += b("chq_undo", "تراجع عن الصرف"));
+    }
+    ACTIVE.includes(c.status) && (btns += b("chq_edit", "تعديل") + b("chq_cancel", "إلغاء الشيك"));
+    ["مرتد", "ملغي"].includes(c.status) && (btns += b("chq_del", "حذف السجل", "danger"));
+    const iv = c.inv && IX.doc.get(c.inv);
+    modal(
+      "<header><h2>شيك " + (isIn(c) ? "وارد" : "صادر") + " " + esc(c.no) + '</h2><button class="btn sm" data-act="close">إغلاق</button></header><div class="body"><table><tbody>' +
+        [
+          ["الحالة", '<span class="chip ' + stColor(c.status) + '">' + c.status + "</span>"],
+          ["الطرف", esc(pname(c.party))],
+          ["البنك", esc(c.bank || "—")],
+          ["المبلغ", fmt(c.amt)],
+          ["تاريخ التحرير", c.date],
+          ["الاستحقاق", c.due],
+          ["الفاتورة", iv ? esc(docLabel(iv)) : "—"],
+          ["الحساب", esc(c.acc + " — " + nm("acc", c.acc))],
+          c.clrDate ? ["تاريخ " + (isIn(c) ? "التحصيل" : "الصرف"), c.clrDate + " — " + esc(nm("acc", c.clrAcc))] : null,
+          c.notes ? ["ملاحظات", esc(c.notes)] : null,
+        ]
+          .filter(Boolean)
+          .map((r) => "<tr><th>" + r[0] + "</th><td>" + r[1] + "</td></tr>")
+          .join("") +
+        '</tbody></table><details style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted)">سجل العمليات</summary><ul>' +
+        (c.log || []).map((l) => "<li>" + esc(l.d) + " — " + esc(l.t) + "</li>").join("") +
+        '</ul></details><p class="note neg" id="cq_err"></p></div><footer>' +
+        btns +
+        '<span style="flex:1"></span><button class="btn" data-act="close">إغلاق</button></footer>',
+    );
+  }
+  A.chq_open = (el) => openDet(el.dataset.id);
+  const guard = (c, dates) => lockChk(dates || [c.date]);
+  A.chq_dep = (el) => {
+    const c = byId(el.dataset.id);
+    if (!c || "محفظة" !== c.status) return;
+    c.status = "مودع";
+    logAdd(c, "تم الإيداع في البنك");
+    persist("cheques");
+    openDet(c.id);
+    render();
+  };
+  /* التحصيل / الصرف: نموذج اختيار البنك والتاريخ */
+  A.chq_clr = (el) => {
+    const c = byId(el.dataset.id);
+    if (!c || !ACTIVE.includes(c.status)) return;
+    CQ = { clr: c.id, acc: mapAcc("bank") || "", date: c.due > today() ? today() : c.due };
+    const bankAcc = S.accounts.filter((a) => /^1101|^1102/.test(a.code) && !S.accounts.some((y) => y.parent === a.code));
+    modal(
+      "<header><h2>" + (isIn(c) ? "تحصيل" : "صرف") + " الشيك " + esc(c.no) + '</h2><button class="btn sm" data-act="close">إغلاق</button></header><div class="body"><div class="form">' +
+        field("تاريخ العملية", '<input type="date" data-cq="date" value="' + esc(CQ.date) + '">') +
+        field(isIn(c) ? "إيداع في (بنك / خزينة)" : "صرف من (بنك)", '<select data-cq="acc">' + accOptsAll(CQ.acc, "— اختر —") + "</select>") +
+        '</div><p class="note">' + (isIn(c) ? "قيد: من البنك إلى " : "قيد: من ") + esc(nm("acc", c.acc)) + (isIn(c) ? "" : " إلى البنك") + ' بمبلغ ' + fmt(c.amt) +
+        '.</p><p class="note neg" id="cq_err"></p></div><footer><button class="btn pri" data-act="chq_clrgo" data-id="' + esc(c.id) + '">تأكيد</button><button class="btn" data-act="close">إلغاء</button></footer>',
+    );
+  };
+  A.chq_clrgo = (el) => {
+    const c = byId(el.dataset.id),
+      err = (m) => ($("#cq_err").textContent = m);
+    if (!c || !CQ || CQ.clr !== c.id) return;
+    const d = CQ.date,
+      acc = CQ.acc;
+    if (!okDate(d)) return err("التاريخ غير صحيح.");
+    if (d < c.date) return err("تاريخ العملية قبل تاريخ تحرير الشيك.");
+    if (d > zbTomorrow()) return err("التاريخ في المستقبل.");
+    const le = zbLeafErr(acc);
+    if (le) return err(le);
+    if (!IX.acc.get(c.acc)) return err("حساب الشيكات غير موجود.");
+    const l = guard(c, [d]);
+    if (l) return err(l);
+    const no = nextJe(),
+      desc = (isIn(c) ? "تحصيل شيك رقم " : "صرف شيك رقم ") + c.no + " — " + pname(c.party);
+    S.journal.push(
+      isIn(c) ? jl(no, d, desc, "chq", acc, c.amt, 0) : jl(no, d, desc, "chq", c.acc, c.amt, 0),
+      isIn(c) ? jl(no, d, desc, "chq", c.acc, 0, c.amt) : jl(no, d, desc, "chq", acc, 0, c.amt),
+    );
+    c.status = isIn(c) ? "محصّل" : "مصروف";
+    c.clrJe = no;
+    c.clrDate = d;
+    c.clrAcc = acc;
+    logAdd(c, (isIn(c) ? "تحصيل" : "صرف") + " بتاريخ " + d);
+    aud("شيك", (isIn(c) ? "تحصيل " : "صرف ") + c.no, d + " · " + fmt(c.amt));
+    saveAll();
+    CQ = null;
+    openDet(c.id);
+    render();
+    toast("تم تسجيل القيد " + no);
+  };
+  A.chq_undo = (el) => {
+    const c = byId(el.dataset.id);
+    if (!c || !DONE.includes(c.status)) return;
+    const l = guard(c, [c.clrDate || c.date]);
+    if (l) return toast(l);
+    ask("التراجع عن " + (isIn(c) ? "التحصيل" : "الصرف") + " وحذف قيده؟", "تراجع", () => {
+      S.journal = S.journal.filter((j) => !("chq" === j.tag && String(j.no) === String(c.clrJe)));
+      c.status = isIn(c) ? "محفظة" : "صادر";
+      c.clrJe = c.clrDate = c.clrAcc = "";
+      logAdd(c, "تراجع عن العملية");
+      aud("شيك", "تراجع " + c.no, "");
+      saveAll();
+      openDet(c.id);
+      render();
+    });
+  };
+  /* ارتداد / إلغاء: يحذف سند التسجيل فتعود المديونية */
+  function reverse(c, st, label) {
+    const l = guard(c);
+    if (l) return toast(l);
+    ask(label + " الشيك " + c.no + " وإلغاء قيد التسجيل (ترجع المديونية على " + pname(c.party) + ")؟", label, () => {
+      dropVch(c);
+      c.status = st;
+      logAdd(c, label);
+      aud("شيك", label + " " + c.no, fmt(c.amt));
+      saveAll();
+      openDet(c.id);
+      render();
+    });
+  }
+  A.chq_bnc = (el) => {
+    const c = byId(el.dataset.id);
+    c && ACTIVE.includes(c.status) && reverse(c, "مرتد", "ارتداد");
+  };
+  A.chq_cancel = (el) => {
+    const c = byId(el.dataset.id);
+    c && ACTIVE.includes(c.status) && reverse(c, "ملغي", "إلغاء");
+  };
+  A.chq_del = (el) => {
+    const c = byId(el.dataset.id);
+    if (!c || !["مرتد", "ملغي"].includes(c.status)) return;
+    ask("حذف سجل الشيك نهائياً؟", "حذف", () => {
+      S.cheques = list().filter((x) => x !== c);
+      aud("حذف", "شيك " + c.no, "");
+      persist("cheques");
+      closeModal();
+      render();
+    });
+  };
+  /* ---- الشاشة ---- */
+  VIEWS.cheques = () => {
+    const f = V.cq,
+      t0 = today(),
+      q = f.q.trim(),
+      all = list(),
+      rows = all
+        .map((c) => Object.assign({}, c, { pn: pname(c.party), od: ACTIVE.includes(c.status) && c.due < t0 }))
+        .filter((c) => (!f.dir || c.dir === f.dir) && (!f.st || c.status === f.st) && (!f.from || c.due >= f.from) && (!f.to || c.due <= f.to) && (!q || (c.no + " " + c.pn + " " + (c.bank || "") + " " + (c.notes || "")).includes(q)))
+        .sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : 0)),
+      sum = (fn) => all.filter(fn).reduce((s, c) => s + c.amt, 0),
+      wk = addDays(t0, 7),
+      inP = sum((c) => isIn(c) && ["محفظة", "مودع"].includes(c.status)),
+      outP = sum((c) => !isIn(c) && "صادر" === c.status),
+      soon = all.filter((c) => ACTIVE.includes(c.status) && c.due >= t0 && c.due <= wk),
+      late = all.filter((c) => ACTIVE.includes(c.status) && c.due < t0),
+      broken = all.filter((c) => (ACTIVE.includes(c.status) && !(c.vch && IX.doc.get(c.vch))) || (DONE.includes(c.status) && !S.journal.some((j) => "chq" === j.tag && String(j.no) === String(c.clrJe)))).length;
+    return (
+      '<div class="grid kpis"><div class="kpi"><small>شيكات واردة بالمحفظة</small><b class="pos">' + fmt(inP) + '</b></div><div class="kpi"><small>شيكات صادرة لم تُصرف</small><b class="neg">' + fmt(outP) + '</b></div><div class="kpi"><small>تستحق خلال 7 أيام</small><b>' + fmt(soon.reduce((s, c) => s + c.amt, 0)) + "</b><i>" + soon.length + ' شيك</i></div><div class="kpi"><small>متأخرة عن الاستحقاق</small><b class="' + (late.length ? "neg" : "") + '">' + fmt(late.reduce((s, c) => s + c.amt, 0)) + "</b><i>" + late.length + " شيك</i></div></div>" +
+      (broken ? '<p class="note neg">تنبيه: ' + broken + " شيك قيده المحاسبي غير مكتمل — راجع سجل الشيك أو احذفه وأعد تسجيله.</p>" : "") +
+      '<div class="bar"><label>النوع<select data-set="cq.dir"><option value="">الكل</option><option value="in"' + ("in" === f.dir ? " selected" : "") + '>وارد</option><option value="out"' + ("out" === f.dir ? " selected" : "") + ">صادر</option></select></label><label>الحالة<select data-set=\"cq.st\"><option value=\"\">الكل</option>" +
+      [...new Set(IN_ST.concat(OUT_ST))].map((s) => "<option" + (f.st === s ? " selected" : "") + ">" + s + "</option>").join("") +
+      "</select></label>" + period("cq") +
+      '<label>بحث<input type="search" id="cqq" data-set="cq.q" data-live value="' + esc(f.q) + '" placeholder="رقم الشيك أو الطرف أو البنك"></label><span class="sp"></span>' + xbtn() +
+      '<button class="btn pri" data-act="chq_new" data-d="in">+ شيك وارد</button><button class="btn" data-act="chq_new" data-d="out">+ شيك صادر</button></div>' +
+      table(
+        "الشيكات وأوراق القبض والدفع",
+        [
+          { k: "due", t: "الاستحقاق", h: (c) => esc(c.due) + (c.od ? ' <span class="chip bad">متأخر</span>' : "") },
+          { k: "no", t: "رقم الشيك", h: (c) => "<b>" + esc(c.no) + "</b>" },
+          { k: "dir", t: "النوع", h: (c) => '<span class="chip ' + (isIn(c) ? "good" : "warn") + '">' + (isIn(c) ? "وارد" : "صادر") + "</span>" },
+          { k: "pn", t: "الطرف" },
+          { k: "bank", t: "البنك" },
+          { k: "amt", t: "المبلغ", n: 1 },
+          { k: "status", t: "الحالة", h: (c) => '<span class="chip ' + stColor(c.status) + '">' + c.status + "</span>" },
+          { k: "notes", t: "ملاحظات" },
+        ],
+        rows,
+        { row: (c) => 'class="click" data-act="chq_open" data-id="' + esc(c.id) + '"' },
+      )
+    );
+  };
 })();
 
 !(async function () {
