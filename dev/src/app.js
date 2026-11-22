@@ -553,7 +553,7 @@ function dash(t, e) {
       const t = s.d - s.c;
       ((a.exp += t), m(o, s.a, t), s.cc && m(l, s.cc, t), b && (b.exp += t));
     }
-    if (s.cu) {
+    if (s.cu && !(s.dc && (IX.doc.get(s.dc) || {}).kind === "inv")) {
       const t = s.c - s.d;
       ((a.coll += t), m(d, s.cu, t), m(p, s.a, t), b && (b.coll += t));
     }
