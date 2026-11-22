@@ -2809,7 +2809,8 @@ function delEnt() {
     ("customers" === t && S.inst.some((t) => t.cu === e)) ||
     ("centers" === t && S.inst.some((t) => t.cc === e)) ||
     ("accounts" === t && S.accounts.some((t) => t.parent === e)) ||
-    ("items" === t && S.moves.some((t) => t.item === e)) ||
+    ("items" === t && (S.moves.some((t) => t.item === e) || S.docs.some((d) => (d.lines || []).some((l) => l.item === e)))) ||
+    (("customers" === t || "suppliers" === t) && S.docs.some((d) => d.party === e)) ||
     ("whs" === t && (S.whs.length < 2 || S.moves.some((t) => t.wh === e || t.wh2 === e)))
   )
     return (
